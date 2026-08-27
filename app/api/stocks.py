@@ -41,7 +41,7 @@ async def get_chart(
         default="1M",
         pattern="^(1D|1W|1M|3M|1Y)$",
     ),
-    refresh: bool = True,
+    refresh: bool = False,
     db: Session = Depends(get_db),
 ):
     service = StockService(db)
@@ -75,7 +75,7 @@ async def get_chart(
 )
 async def get_stock(
     stock_code: str,
-    refresh: bool = True,
+    refresh: bool = False,
     db: Session = Depends(get_db),
 ):
     service = StockService(db)

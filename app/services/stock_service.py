@@ -76,7 +76,7 @@ class StockService:
         self,
         stock_code: str,
         *,
-        refresh: bool = True,
+        refresh: bool = False,
     ) -> StockResponse:
         stock = self.repository.get_stock(
             stock_code
@@ -378,7 +378,7 @@ class StockService:
         stock_code: str,
         *,
         period: str,
-        refresh: bool = True,
+        refresh: bool = False,
     ) -> list[ChartPointResponse]:
         if self.repository.get_stock(stock_code) is None:
             raise ValueError(
