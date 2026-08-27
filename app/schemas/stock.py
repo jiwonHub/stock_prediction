@@ -19,6 +19,12 @@ class ChartPointResponse(BaseModel):
     time: str
     price: float
 
+    open: float | None = None
+    high: float | None = None
+    low: float | None = None
+    close: float | None = None
+    volume: int | None = None
+
 
 class SyncResponse(BaseModel):
     success: bool = True

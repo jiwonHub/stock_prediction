@@ -466,6 +466,11 @@ class StockService:
                     datetime.min.time(),
                 ).isoformat(),
                 price=float(row.close),
+                open=float(row.open),
+                high=float(row.high),
+                low=float(row.low),
+                close=float(row.close),
+                volume=int(row.volume or 0),
             )
             for row in rows
         ]
