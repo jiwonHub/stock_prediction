@@ -1,0 +1,16 @@
+services:
+  db:
+    image: postgres:17
+    container_name: stock-ai-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: stock_ai
+      POSTGRES_USER: stock
+      POSTGRES_PASSWORD: stock
+    ports:
+      - "5432:5432"
+    volumes:
+      - stock_ai_pgdata:/var/lib/postgresql/data
+
+volumes:
+  stock_ai_pgdata:
