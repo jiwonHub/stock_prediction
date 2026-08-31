@@ -278,6 +278,34 @@ class StockRepository:
             .limit(limit)
         )
         return list(self.db.scalars(stmt).all())
+    
+    def get_stock_codes_for_market_context(
+        self,
+        *,
+        limit: int,
+    ) -> list[str]:
+        stmt = (
+            select(Stock.code)
+            .where(
+                Stock.is_active.is_(True),
+                Stock.current_price.is_not(None),
+                Stock.current_price > 0,
+                Stock.market_cap.is_not(None),
+                Stock.market_cap > 0,
+            )
+            .order_by(
+                Stock.market_cap.desc(),
+                Stock.current_price.desc(),
+                Stock.code.asc(),
+            )
+            .limit(limit)
+        )
+
+        return list(
+            self.db.scalars(
+                stmt
+            ).all()
+        )
 
     def get_stock_codes_with_financials(
         self,
@@ -373,6 +401,73 @@ class StockRepository:
         )
 
         return [(stock, metric) for stock, metric in self.db.execute(stmt).all()]
+
+    def get_ranking_context_by_stock_codes(
+        self,
+        stock_codes: list[str],
+    ) -> list[
+        tuple[
+            Stock,
+            FinancialMetric | None,
+        ]
+    ]:
+        if not stock_codes:
+            return []
+
+        latest_year = (
+            select(
+                func.max(
+                    FinancialMetric.business_year
+                )
+            )
+            .where(
+                FinancialMetric.stock_code
+                == Stock.code,
+                FinancialMetric.report_code
+                == "11011",
+            )
+            .correlate(
+                Stock
+            )
+            .scalar_subquery()
+        )
+
+        stmt = (
+            select(
+                Stock,
+                FinancialMetric,
+            )
+            .outerjoin(
+                FinancialMetric,
+                and_(
+                    FinancialMetric.stock_code
+                    == Stock.code,
+                    FinancialMetric.business_year
+                    == latest_year,
+                    FinancialMetric.report_code
+                    == "11011",
+                ),
+            )
+            .where(
+                Stock.code.in_(
+                    stock_codes
+                )
+            )
+        )
+
+        return [
+            (
+                stock,
+                metric,
+            )
+            for (
+                stock,
+                metric,
+            )
+            in self.db.execute(
+                stmt
+            ).all()
+        ]
 
 
     def upsert_stock_prediction(
@@ -540,3 +635,39 @@ class StockRepository:
         return list(
             self.db.scalars(stmt).all()
         )
+    
+    def update_market_sector_metadata(
+        self,
+        rows: list[dict],
+    ) -> int:
+        if not rows:
+            return 0
+
+        updated = 0
+
+        for row in rows:
+            stock = self.get_stock(
+                row["stock_code"]
+            )
+
+            if stock is None:
+                continue
+
+            market = row.get("market")
+            sector_code = row.get(
+                "sector_code"
+            )
+
+            if market:
+                stock.market = market
+
+            if sector_code:
+                stock.sector_code = (
+                    sector_code
+                )
+
+            updated += 1
+
+        self.db.commit()
+
+        return updated

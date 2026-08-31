@@ -16,6 +16,13 @@ from app.models.future import (
     StockNews,
     StockPredictionHistory,
 )
+from app.models.market_data import (
+    MacroIndicator,
+    MarketIndexPrice,
+    SectorIndexPrice,
+    StockInvestorFlow,
+    StockValuationSnapshot,
+)
 from app.models.stock import Stock
 from app.models.stock_price import StockPrice
 from app.models.stock_prediction import StockPrediction
@@ -40,4 +47,9 @@ __all__ = [
     "RankingItem",
     "RecommendationPerformance",
     "AppSetting",
+    "MarketIndexPrice",
+    "MacroIndicator",
+    "SectorIndexPrice",
+    "StockInvestorFlow",
+    "StockValuationSnapshot",
 ]

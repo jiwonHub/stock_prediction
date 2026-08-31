@@ -6,6 +6,9 @@ from app.core.database import get_db
 from app.core.exceptions import ConfigurationError, ExternalApiError
 from app.schemas.ml import MlBatchResponse, StockPredictionResponse
 from app.services.ml_prediction_service import MlPredictionService
+from app.services.historical_ml_training_service import (
+    HistoricalMlTrainingService,
+)
 
 
 router = APIRouter(
@@ -13,10 +16,67 @@ router = APIRouter(
     tags=["admin-ml"],
 )
 
+
+@router.get(
+    "/historical/split/inspect",
+)
+def inspect_historical_ml_split(
+    feature_version: str = Query(
+        default=(
+            HistoricalMlTrainingService
+            .DEFAULT_FEATURE_VERSION
+        ),
+        min_length=1,
+        max_length=40,
+    ),
+    horizon: int = Query(
+        default=5,
+    ),
+    train_ratio: float = Query(
+        default=0.70,
+        ge=0.50,
+        le=0.85,
+    ),
+    valid_ratio: float = Query(
+        default=0.15,
+        ge=0.05,
+        le=0.30,
+    ),
+    db: Session = Depends(
+        get_db
+    ),
+):
+    try:
+        return (
+            HistoricalMlTrainingService(
+                db
+            )
+            .inspect_temporal_split(
+                feature_version=(
+                    feature_version
+                ),
+                horizon=horizon,
+                train_ratio=(
+                    train_ratio
+                ),
+                valid_ratio=(
+                    valid_ratio
+                ),
+            )
+        )
+
+    except ValueError as e:
+        raise HTTPException(
+            status_code=400,
+            detail=str(e),
+        ) from e
+
+
 @router.post(
     "/predict/batch",
     response_model=MlBatchResponse,
 )
+
 async def predict_stock_models_batch(
     limit: int = Query(
         default=100,

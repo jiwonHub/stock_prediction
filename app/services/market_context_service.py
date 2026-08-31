@@ -666,6 +666,191 @@ class MarketContextService:
         self.db.commit()
 
         return saved
+    
+    async def sync_disclosures_history(
+        self,
+        *,
+        stock_code: str,
+        begin_date: date,
+        end_date: date,
+    ) -> dict:
+        stock = self.db.get(
+            Stock,
+            stock_code,
+        )
+
+        if stock is None:
+            raise ValueError(
+                "등록되지 않은 종목입니다: "
+                f"{stock_code}"
+            )
+
+        if not stock.corp_code:
+            raise ValueError(
+                "DART corp_code가 없습니다: "
+                f"{stock_code}"
+            )
+
+        rows = (
+            await dart_client
+            .fetch_disclosures_all(
+                corp_code=(
+                    stock.corp_code
+                ),
+                begin_date=(
+                    begin_date
+                ),
+                end_date=(
+                    end_date
+                ),
+                page_count=100,
+            )
+        )
+
+        saved = 0
+        duplicate = 0
+        invalid = 0
+
+        for row in rows:
+            receipt_no = str(
+                row.get(
+                    "rcept_no",
+                    "",
+                )
+            ).strip()
+
+            if not receipt_no:
+                invalid += 1
+                continue
+
+            exists = self.db.scalar(
+                select(
+                    Disclosure.id
+                )
+                .where(
+                    Disclosure.receipt_no
+                    == receipt_no
+                )
+                .limit(1)
+            )
+
+            if exists is not None:
+                duplicate += 1
+                continue
+
+            receipt_date = None
+
+            receipt_date_text = str(
+                row.get(
+                    "rcept_dt",
+                    "",
+                )
+            ).strip()
+
+            if receipt_date_text:
+                try:
+                    receipt_date = (
+                        datetime.strptime(
+                            receipt_date_text,
+                            "%Y%m%d",
+                        )
+                        .date()
+                    )
+                except ValueError:
+                    receipt_date = None
+
+            report_name = str(
+                row.get(
+                    "report_nm",
+                    "",
+                )
+            ).strip()
+
+            row_corp_code = str(
+                row.get(
+                    "corp_code",
+                    "",
+                )
+            ).strip()
+
+            self.db.add(
+                Disclosure(
+                    stock_code=(
+                        stock.code
+                    ),
+
+                    corp_code=(
+                        row_corp_code
+                        or stock.corp_code
+                    ),
+
+                    receipt_no=(
+                        receipt_no
+                    ),
+
+                    report_name=(
+                        report_name
+                        or "공시"
+                    ),
+
+                    filer_name=(
+                        str(
+                            row.get(
+                                "flr_nm",
+                                "",
+                            )
+                        ).strip()
+                        or None
+                    ),
+
+                    receipt_date=(
+                        receipt_date
+                    ),
+
+                    disclosure_type=(
+                        str(
+                            row.get(
+                                "corp_cls",
+                                "",
+                            )
+                        ).strip()
+                        or None
+                    ),
+
+                    url=(
+                        "https://dart.fss.or.kr/"
+                        "dsaf001/main.do?"
+                        f"rcpNo={receipt_no}"
+                    ),
+
+                    raw_json=dict(
+                        row
+                    ),
+                )
+            )
+
+            saved += 1
+
+        self.db.commit()
+
+        return {
+            "stock_code":
+                stock_code,
+
+            "fetched":
+                len(
+                    rows
+                ),
+
+            "saved":
+                saved,
+
+            "duplicate":
+                duplicate,
+
+            "invalid":
+                invalid,
+        }
 
     def get_disclosures(
         self,

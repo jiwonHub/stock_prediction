@@ -14,6 +14,9 @@ class Settings(BaseSettings):
 
     dart_api_key: str = ""
 
+    ecos_api_key: str = ""
+    ecos_base_url: str = "https://ecos.bok.or.kr/api"
+
     kis_app_key: str = ""
     kis_app_secret: str = ""
     kis_base_url: str = "https://openapi.koreainvestment.com:9443"

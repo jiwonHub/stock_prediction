@@ -101,6 +101,79 @@ def _feature_vector(rows: list, index: int) -> list[float]:
         close_position,
     ]
 
+def build_latest_feature_dict(
+    rows: list,
+) -> dict[str, float]:
+    if len(rows) < 61:
+        raise ValueError(
+            "최신 Feature 계산에는 "
+            "최소 61거래일의 일봉 데이터가 필요합니다."
+        )
+
+    index = len(rows) - 1
+
+    values = _feature_vector(
+        rows,
+        index,
+    )
+
+    result = dict(
+        zip(
+            FEATURE_NAMES,
+            values,
+        )
+    )
+
+    result["return_60d"] = _pct_return(
+        float(rows[index].close),
+        float(
+            rows[
+                index - 60
+            ].close
+        ),
+    )
+
+    return result
+
+def build_feature_dict_at_index(
+    rows: list,
+    index: int,
+) -> dict[str, float]:
+    if index < 60:
+        raise ValueError(
+            "Feature 계산에는 최소 61거래일의 "
+            "일봉 데이터가 필요합니다."
+        )
+
+    if index >= len(rows):
+        raise ValueError(
+            "Feature index가 일봉 범위를 벗어났습니다."
+        )
+
+    values = _feature_vector(
+        rows,
+        index,
+    )
+
+    result = dict(
+        zip(
+            FEATURE_NAMES,
+            values,
+        )
+    )
+
+    result["return_60d"] = _pct_return(
+        float(
+            rows[index].close
+        ),
+        float(
+            rows[
+                index - 60
+            ].close
+        ),
+    )
+
+    return result
 
 def build_dataset(rows: list, *, horizon_days: int) -> MlDataset:
     if len(rows) < 120:

@@ -22,6 +22,45 @@ class StockService:
             db
         )
 
+    @staticmethod
+    def _normalize_market_name(
+        value: object,
+    ) -> str | None:
+        text = str(
+            value or ""
+        ).strip()
+
+        if not text:
+            return None
+
+        upper = (
+            text
+            .upper()
+            .replace(" ", "")
+        )
+
+        if (
+            "KOSDAQ" in upper
+            or upper.startswith("KSQ")
+            or "코스닥" in text
+        ):
+            return "KOSDAQ"
+
+        if (
+            "KOSPI" in upper
+            or "코스피" in text
+            or "유가증권" in text
+            or text == "거래소"
+        ):
+            return "KOSPI"
+
+        if (
+            "KONEX" in upper
+            or "코넥스" in text
+        ):
+            return "KONEX"
+
+        return text
 
     @staticmethod
     def _apply_kis_sign(
@@ -114,6 +153,8 @@ class StockService:
     async def sync_current_price(
         self,
         stock_code: str,
+        *,
+        market_override: str | None = None,
     ) -> StockResponse:
         output = await kis_client.get_current_price(
             stock_code
@@ -181,13 +222,12 @@ class StockService:
             )
             or None,
             market=(
-                str(
+                market_override
+                or self._normalize_market_name(
                     output.get(
-                        "rprs_mrkt_kor_name",
-                        "",
+                        "rprs_mrkt_kor_name"
                     )
-                ).strip()
-                or None
+                )
             ),
             sector_name=(
                 str(
@@ -591,77 +631,216 @@ class StockService:
         *,
         limit: int,
     ) -> list[RankingResponse]:
-        candidates = self.repository.get_phase4_ranking_candidates(
-            horizon_days=5,
-            scan_limit=max(200, limit * 5),
+        from app.services.ml_ranking_inference_service import (
+            MlRankingInferenceService,
         )
+
+        phase6_result = (
+            MlRankingInferenceService(
+                self.db
+            )
+            .score_current_universe(
+                limit=100,
+            )
+        )
+
+        phase6_rows = (
+            phase6_result[
+                "scores"
+            ]
+        )
+
+        stock_codes = [
+            row[
+                "stock_code"
+            ]
+            for row
+            in phase6_rows
+        ]
+
+        contexts = (
+            self.repository
+            .get_ranking_context_by_stock_codes(
+                stock_codes
+            )
+        )
+
+        context_map = {
+            stock.code: (
+                stock,
+                metric,
+            )
+            for (
+                stock,
+                metric,
+            )
+            in contexts
+        }
 
         scored = []
 
-        for stock, metric, prediction in candidates:
-            financial_score = float(metric.financial_score) if metric else 0.0
-            ml_score = float(prediction.ml_score) if prediction else 0.0
+        for phase6_row in phase6_rows:
+            stock_code = (
+                phase6_row[
+                    "stock_code"
+                ]
+            )
 
-            if metric is not None and prediction is not None:
-                total_score = financial_score * 0.45 + ml_score * 0.55
-            elif prediction is not None:
-                total_score = ml_score
+            context = (
+                context_map.get(
+                    stock_code
+                )
+            )
+
+            if context is None:
+                continue
+
+            (
+                stock,
+                metric,
+            ) = context
+
+            ml_score = float(
+                phase6_row[
+                    "ml_score"
+                ]
+            )
+
+            financial_score = (
+                float(
+                    metric.financial_score
+                )
+                if metric is not None
+                else 0.0
+            )
+
+            if metric is not None:
+                total_score = (
+                    financial_score
+                    * 0.45
+                    + ml_score
+                    * 0.55
+                )
             else:
-                total_score = financial_score
+                total_score = (
+                    ml_score
+                )
 
             scored.append(
                 (
                     total_score,
                     stock,
                     metric,
-                    prediction,
+                    phase6_row,
                 )
             )
 
         scored.sort(
             key=lambda item: (
                 item[0],
-                float(item[1].market_cap or 0.0),
+                float(
+                    item[
+                        1
+                    ].market_cap
+                    or 0.0
+                ),
             ),
             reverse=True,
         )
 
-        result: list[RankingResponse] = []
-        seen_codes: set[str] = set()
+        result: list[
+            RankingResponse
+        ] = []
 
-        for total_score, stock, metric, prediction in scored:
-            if stock.code in seen_codes:
-                continue
+        for (
+            total_score,
+            stock,
+            metric,
+            phase6_row,
+        ) in scored:
+            rank = (
+                len(
+                    result
+                )
+                + 1
+            )
 
-            seen_codes.add(stock.code)
-            rank = len(result) + 1
-            financial_score = float(metric.financial_score) if metric else 0.0
+            financial_score = (
+                float(
+                    metric.financial_score
+                )
+                if metric is not None
+                else 0.0
+            )
 
             result.append(
                 RankingResponse(
                     rank=rank,
-                    stockCode=stock.code,
-                    stockName=stock.name,
-                    currentPrice=float(stock.current_price or 0.0),
-                    changeRate=float(stock.change_rate or 0.0),
-                    totalScore=round(float(total_score), 2),
-                    predictedReturn=(
-                        float(prediction.predicted_return) if prediction else 0.0
+                    stockCode=(
+                        stock.code
                     ),
-                    upsideProbability=(
-                        float(prediction.upside_probability) if prediction else 0.0
+                    stockName=(
+                        stock.name
                     ),
-                    financialScore=financial_score,
-                    growthScore=float(metric.growth_score) if metric else 0.0,
+                    currentPrice=float(
+                        stock.current_price
+                        or 0.0
+                    ),
+                    changeRate=float(
+                        stock.change_rate
+                        or 0.0
+                    ),
+                    totalScore=round(
+                        float(
+                            total_score
+                        ),
+                        2,
+                    ),
+                    predictedReturn=0.0,
+                    upsideProbability=0.0,
+                    financialScore=(
+                        financial_score
+                    ),
+                    growthScore=(
+                        float(
+                            metric.growth_score
+                        )
+                        if metric
+                        else 0.0
+                    ),
                     profitabilityScore=(
-                        float(metric.profitability_score) if metric else 0.0
+                        float(
+                            metric
+                            .profitability_score
+                        )
+                        if metric
+                        else 0.0
                     ),
-                    stabilityScore=float(metric.stability_score) if metric else 0.0,
-                    cashFlowScore=float(metric.cash_flow_score) if metric else 0.0,
+                    stabilityScore=(
+                        float(
+                            metric
+                            .stability_score
+                        )
+                        if metric
+                        else 0.0
+                    ),
+                    cashFlowScore=(
+                        float(
+                            metric
+                            .cash_flow_score
+                        )
+                        if metric
+                        else 0.0
+                    ),
                 )
             )
 
-            if len(result) >= limit:
+            if (
+                len(
+                    result
+                )
+                >= limit
+            ):
                 break
 
         return result

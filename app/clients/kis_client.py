@@ -32,6 +32,24 @@ class KisClient:
     )
     INTRADAY_TR_ID = "FHKST03010200"
 
+    INDEX_DAILY_PATH = (
+        "/uapi/domestic-stock/v1/quotations/"
+        "inquire-daily-indexchartprice"
+    )
+    INDEX_DAILY_TR_ID = "FHKUP03500100"
+
+    INVESTOR_PATH = (
+        "/uapi/domestic-stock/v1/quotations/"
+        "inquire-investor"
+    )
+    INVESTOR_TR_ID = "FHKST01010900"
+
+    MARKET_CAP_PATH = (
+        "/uapi/domestic-stock/v1/ranking/"
+        "market-cap"
+    )
+    MARKET_CAP_TR_ID = "FHPST01740000"
+
     def __init__(self):
         self._access_token: str | None = None
         self._expires_at: float = 0.0
@@ -190,6 +208,7 @@ class KisClient:
         path: str,
         tr_id: str,
         params: dict[str, str],
+        tr_cont: str = "",
     ) -> dict[str, Any]:
         self._require_keys()
 
@@ -205,12 +224,20 @@ class KisClient:
                 response = await client.get(
                     path,
                     headers={
-                        "Content-Type": "application/json; charset=utf-8",
-                        "authorization": f"Bearer {token}",
-                        "appkey": settings.kis_app_key,
-                        "appsecret": settings.kis_app_secret,
-                        "tr_id": tr_id,
-                        "custtype": "P",
+                        "Content-Type":
+                            "application/json; charset=utf-8",
+                        "authorization":
+                            f"Bearer {token}",
+                        "appkey":
+                            settings.kis_app_key,
+                        "appsecret":
+                            settings.kis_app_secret,
+                        "tr_id":
+                            tr_id,
+                        "custtype":
+                            "P",
+                        "tr_cont":
+                            tr_cont,
                     },
                     params=params,
                 )
@@ -243,6 +270,16 @@ class KisClient:
                 ) from e
 
             if str(payload.get("rt_cd", "")) == "0":
+                payload["_tr_cont"] = (
+                    response.headers.get(
+                        "tr_cont"
+                    )
+                    or response.headers.get(
+                        "tr-cont"
+                    )
+                    or ""
+                ).strip().upper()
+
                 return payload
 
             message_code = str(
@@ -305,25 +342,52 @@ class KisClient:
         all_rows: list[dict[str, Any]] = []
 
         current_end = end_date
+        page = 0
 
         while current_end >= start_date:
+            page += 1
+
             current_start = max(
                 start_date,
                 current_end - timedelta(days=119),
             )
 
-            payload = await self._get(
-                path=self.DAILY_PRICE_PATH,
-                tr_id=self.DAILY_PRICE_TR_ID,
-                params={
-                    "FID_COND_MRKT_DIV_CODE": settings.kis_market_div_code,
-                    "FID_INPUT_ISCD": stock_code,
-                    "FID_INPUT_DATE_1": current_start.strftime("%Y%m%d"),
-                    "FID_INPUT_DATE_2": current_end.strftime("%Y%m%d"),
-                    "FID_PERIOD_DIV_CODE": "D",
-                    "FID_ORG_ADJ_PRC": "0",
-                },
+            print(
+                "[KIS STOCK] "
+                f"{stock_code} "
+                f"{page}페이지 "
+                f"{current_start} ~ {current_end}",
+                flush=True,
             )
+
+            try:
+                payload = await asyncio.wait_for(
+                    self._get(
+                        path=self.DAILY_PRICE_PATH,
+                        tr_id=self.DAILY_PRICE_TR_ID,
+                        params={
+                            "FID_COND_MRKT_DIV_CODE":
+                                settings.kis_market_div_code,
+                            "FID_INPUT_ISCD":
+                                stock_code,
+                            "FID_INPUT_DATE_1":
+                                current_start.strftime("%Y%m%d"),
+                            "FID_INPUT_DATE_2":
+                                current_end.strftime("%Y%m%d"),
+                            "FID_PERIOD_DIV_CODE":
+                                "D",
+                            "FID_ORG_ADJ_PRC":
+                                "0",
+                        },
+                    ),
+                    timeout=12.0,
+                )
+
+            except asyncio.TimeoutError as e:
+                raise ExternalApiError(
+                    "KIS 종목 일봉 응답 지연: "
+                    f"{stock_code} 12초 초과"
+                ) from e
 
             rows = list(
                 payload.get("output2") or []
@@ -339,7 +403,18 @@ class KisClient:
                 - timedelta(days=1)
             )
 
-        unique_rows: dict[str, dict[str, Any]] = {}
+        unique_rows: dict[
+            str,
+            dict[str, Any],
+        ] = {}
+
+        start_text = start_date.strftime(
+            "%Y%m%d"
+        )
+
+        end_text = end_date.strftime(
+            "%Y%m%d"
+        )
 
         for row in all_rows:
             date_key = str(
@@ -349,13 +424,287 @@ class KisClient:
                 )
             )
 
-            if date_key:
-                unique_rows[date_key] = dict(row)
+            if (
+                date_key
+                and start_text
+                <= date_key
+                <= end_text
+            ):
+                unique_rows[
+                    date_key
+                ] = dict(row)
 
         return [
             unique_rows[key]
-            for key in sorted(unique_rows)
+            for key in sorted(
+                unique_rows
+            )
         ]
+
+    async def get_index_daily_prices(
+        self,
+        index_code: str,
+        *,
+        start_date: date,
+        end_date: date,
+    ) -> list[dict[str, Any]]:
+        all_rows: list[dict[str, Any]] = []
+
+        cursor_end = end_date
+
+        start_text = start_date.strftime(
+            "%Y%m%d"
+        )
+
+        end_text = end_date.strftime(
+            "%Y%m%d"
+        )
+
+        seen_cursors: set[str] = set()
+
+        calendar_days = max(
+            1,
+            (
+                end_date
+                - start_date
+            ).days
+            + 1,
+        )
+
+        max_pages = min(
+            60,
+            max(
+                10,
+                (
+                    calendar_days
+                    // 50
+                )
+                + 2,
+            ),
+        )
+
+        for page in range(
+            1,
+            max_pages + 1,
+        ):
+            cursor_text = (
+                cursor_end.strftime(
+                    "%Y%m%d"
+                )
+            )
+
+            if cursor_text in seen_cursors:
+                print(
+                    "[KIS INDEX] "
+                    f"{index_code} "
+                    "cursor 반복 중단",
+                    flush=True,
+                )
+                break
+
+            seen_cursors.add(
+                cursor_text
+            )
+
+            print(
+                "[KIS INDEX] "
+                f"{index_code} "
+                f"{page}/{max_pages} 요청 "
+                f"{start_text} ~ "
+                f"{cursor_text}",
+                flush=True,
+            )
+
+            started_at = (
+                time.monotonic()
+            )
+
+            try:
+                payload = (
+                    await asyncio.wait_for(
+                        self._get(
+                            path=(
+                                self.INDEX_DAILY_PATH
+                            ),
+                            tr_id=(
+                                self.INDEX_DAILY_TR_ID
+                            ),
+                            params={
+                                "FID_COND_MRKT_DIV_CODE":
+                                    "U",
+                                "FID_INPUT_ISCD":
+                                    index_code,
+                                "FID_INPUT_DATE_1":
+                                    start_text,
+                                "FID_INPUT_DATE_2":
+                                    cursor_text,
+                                "FID_PERIOD_DIV_CODE":
+                                    "D",
+                            },
+                        ),
+                        timeout=8.0,
+                    )
+                )
+
+            except asyncio.TimeoutError as e:
+                raise ExternalApiError(
+                    "KIS 업종지수 응답 지연: "
+                    f"{index_code} "
+                    "8초 초과"
+                ) from e
+
+            rows = list(
+                payload.get(
+                    "output2"
+                )
+                or []
+            )
+
+            print(
+                "[KIS INDEX] "
+                f"{index_code} "
+                f"{len(rows)}건 응답 "
+                f"("
+                f"{time.monotonic() - started_at:.1f}"
+                "초)",
+                flush=True,
+            )
+
+            if not rows:
+                break
+
+            all_rows.extend(
+                rows
+            )
+
+            dates = [
+                str(
+                    row.get(
+                        "stck_bsop_date",
+                        "",
+                    )
+                )
+                for row in rows
+                if row.get(
+                    "stck_bsop_date"
+                )
+            ]
+
+            if not dates:
+                break
+
+            earliest = min(
+                dates
+            )
+
+            if earliest <= start_text:
+                break
+
+            try:
+                next_cursor = (
+                    datetime.strptime(
+                        earliest,
+                        "%Y%m%d",
+                    ).date()
+                    - timedelta(
+                        days=1
+                    )
+                )
+
+            except ValueError:
+                break
+
+            if (
+                next_cursor
+                >= cursor_end
+            ):
+                break
+
+            cursor_end = (
+                next_cursor
+            )
+
+        unique_rows: dict[
+            str,
+            dict[str, Any],
+        ] = {}
+
+        for row in all_rows:
+            date_key = str(
+                row.get(
+                    "stck_bsop_date",
+                    "",
+                )
+            )
+
+            if (
+                date_key
+                and start_text
+                <= date_key
+                <= end_text
+            ):
+                unique_rows[
+                    date_key
+                ] = dict(row)
+
+        return [
+            unique_rows[key]
+            for key
+            in sorted(
+                unique_rows
+            )
+        ]
+
+    async def get_investor_flows(
+        self,
+        stock_code: str,
+    ) -> list[dict[str, Any]]:
+        payload = await self._get(
+            path=self.INVESTOR_PATH,
+            tr_id=self.INVESTOR_TR_ID,
+            params={
+                "FID_COND_MRKT_DIV_CODE": (
+                    settings
+                    .kis_market_div_code
+                ),
+                "FID_INPUT_ISCD": (
+                    stock_code
+                ),
+            },
+        )
+
+        output = (
+            payload.get("output")
+            or []
+        )
+
+        if isinstance(
+            output,
+            dict,
+        ):
+            output = [output]
+
+        result: list[
+            dict[str, Any]
+        ] = []
+
+        for row in output:
+            if not isinstance(
+                row,
+                dict,
+            ):
+                continue
+
+            if not row.get(
+                "stck_bsop_date"
+            ):
+                continue
+
+            result.append(
+                dict(row)
+            )
+
+        return result
 
     async def get_intraday_prices(
         self,
@@ -426,6 +775,205 @@ class KisClient:
             result.append(dict(row))
 
         return result
+    
+    async def get_market_cap_rankings(
+        self,
+        *,
+        market_code: str,
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        if market_code not in {
+            "0001",
+            "1001",
+        }:
+            raise ValueError(
+                "market_code는 "
+                "0001(KOSPI) 또는 "
+                "1001(KOSDAQ)이어야 합니다."
+            )
+
+        unique_rows: dict[
+            str,
+            dict[str, Any],
+        ] = {}
+
+        tr_cont = ""
+
+        for _ in range(10):
+            payload = await self._get(
+                path=self.MARKET_CAP_PATH,
+                tr_id=self.MARKET_CAP_TR_ID,
+                tr_cont=tr_cont,
+                params={
+                    "fid_input_price_2": "",
+                    "fid_cond_mrkt_div_code":
+                        "J",
+                    "fid_cond_scr_div_code":
+                        "20174",
+
+                    # 보통주만
+                    "fid_div_cls_code":
+                        "1",
+
+                    "fid_input_iscd":
+                        market_code,
+
+                    "fid_trgt_cls_code":
+                        "0",
+
+                    "fid_trgt_exls_cls_code":
+                        "0",
+
+                    "fid_input_price_1":
+                        "",
+
+                    "fid_vol_cnt":
+                        "",
+                },
+            )
+
+            rows = (
+                payload.get("output")
+                or []
+            )
+
+            for raw in rows:
+                if not isinstance(
+                    raw,
+                    dict,
+                ):
+                    continue
+
+                stock_code = str(
+                    raw.get(
+                        "mksc_shrn_iscd",
+                        "",
+                    )
+                ).strip()
+
+                if not stock_code:
+                    continue
+
+                unique_rows[
+                    stock_code
+                ] = dict(raw)
+
+            if len(unique_rows) >= limit:
+                break
+
+            next_cont = str(
+                payload.get(
+                    "_tr_cont",
+                    "",
+                )
+            ).strip().upper()
+
+            print(
+                "[KIS MARKET CAP] "
+                f"market={market_code}, "
+                f"rows={len(rows)}, "
+                f"total={len(unique_rows)}, "
+                f"tr_cont={next_cont!r}",
+                flush=True,
+            )
+            
+            if next_cont not in {"F", "M"}:
+                break
+
+            tr_cont = "N"
+
+        result = list(
+            unique_rows.values()
+        )
+
+        result.sort(
+            key=lambda row: (
+                self._market_cap_value(
+                    row.get(
+                        "stck_avls"
+                    )
+                )
+            ),
+            reverse=True,
+        )
+
+        return result[:limit]
+    
+    async def get_market_cap_universe(
+        self,
+        *,
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        per_market_limit = max(
+            limit,
+            100,
+        )
+
+        kospi = await self.get_market_cap_rankings(
+            market_code="0001",
+            limit=per_market_limit,
+        )
+
+        kosdaq = await self.get_market_cap_rankings(
+            market_code="1001",
+            limit=per_market_limit,
+        )
+
+        merged: list[dict[str, Any]] = []
+
+        for raw in kospi:
+            row = dict(raw)
+            row["_market"] = "KOSPI"
+            merged.append(row)
+
+        for raw in kosdaq:
+            row = dict(raw)
+            row["_market"] = "KOSDAQ"
+            merged.append(row)
+
+        merged.sort(
+            key=lambda row: self._market_cap_value(
+                row.get("stck_avls")
+            ),
+            reverse=True,
+        )
+
+        unique_rows: dict[str, dict[str, Any]] = {}
+
+        for row in merged:
+            stock_code = str(
+                row.get(
+                    "mksc_shrn_iscd",
+                    "",
+                )
+            ).strip()
+
+            if not stock_code:
+                continue
+
+            if stock_code in unique_rows:
+                continue
+
+            unique_rows[stock_code] = row
+
+            if len(unique_rows) >= limit:
+                break
+
+        return list(unique_rows.values())
+    
+    @staticmethod
+    def _market_cap_value(
+        value: object,
+    ) -> float:
+        try:
+            return float(
+                str(value or "0")
+                .replace(",", "")
+                .strip()
+                or "0"
+            )
+        except ValueError:
+            return 0.0
 
 
 kis_client = KisClient()

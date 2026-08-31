@@ -189,6 +189,8 @@ class Disclosure(Base):
     raw_json: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
+    
+
 
 class RankingSnapshot(Base):
     __tablename__ = "ranking_snapshots"
@@ -225,6 +227,101 @@ class RankingItem(Base):
     rationale: Mapped[str | None] = mapped_column(Text, nullable=True)
     score_components_json: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+class DisclosureAnalysis(Base):
+    __tablename__ = "disclosure_analyses"
+
+    __table_args__ = (
+        UniqueConstraint(
+            "disclosure_id",
+            "model_name",
+            "model_version",
+            name="uq_disclosure_analysis",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(
+        BigInteger,
+        primary_key=True,
+        autoincrement=True,
+    )
+
+    disclosure_id: Mapped[int] = mapped_column(
+        ForeignKey(
+            "disclosures.id",
+            ondelete="CASCADE",
+        ),
+        index=True,
+    )
+
+    stock_code: Mapped[str] = mapped_column(
+        ForeignKey(
+            "stocks.code",
+            ondelete="CASCADE",
+        ),
+        index=True,
+    )
+
+    model_name: Mapped[str] = mapped_column(
+        String(100),
+        default="taxonomy-rule",
+    )
+
+    model_version: Mapped[str] = mapped_column(
+        String(80),
+        default="v1",
+    )
+
+    event_type: Mapped[str] = mapped_column(
+        String(80),
+        index=True,
+    )
+
+    direction_score: Mapped[float] = mapped_column(
+        Float,
+        default=0.0,
+    )
+
+    importance_score: Mapped[float] = mapped_column(
+        Float,
+        default=0.0,
+    )
+
+    impact_score: Mapped[float] = mapped_column(
+        Float,
+        default=0.0,
+        index=True,
+    )
+
+    matched_keyword: Mapped[str | None] = mapped_column(
+        Text,
+        nullable=True,
+    )
+
+    is_correction: Mapped[bool] = mapped_column(
+        Boolean,
+        default=False,
+        index=True,
+    )
+
+    normalized_name: Mapped[str] = mapped_column(
+        Text,
+    )
+
+    rationale: Mapped[str | None] = mapped_column(
+        Text,
+        nullable=True,
+    )
+
+    analysis_json: Mapped[dict | None] = mapped_column(
+        JSONB,
+        nullable=True,
+    )
+
+    analyzed_at: Mapped[datetime] = mapped_column(
+        DateTime,
+        default=datetime.utcnow,
+    )
 
 
 class RecommendationPerformance(Base):

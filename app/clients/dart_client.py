@@ -183,3 +183,107 @@ class DartClient:
                 f"{payload.get('message')} "
                 f"({status})"
             )
+
+    async def fetch_disclosures_all(
+        self,
+        *,
+        corp_code: str,
+        begin_date,
+        end_date,
+        page_count: int = 100,
+        max_pages: int = 50,
+    ) -> list[dict]:
+        self._require_key()
+
+        normalized_page_count = max(
+            1,
+            min(
+                100,
+                page_count,
+            ),
+        )
+
+        all_rows: list[dict] = []
+
+        async with httpx.AsyncClient(
+            timeout=30.0,
+        ) as client:
+            for page_no in range(
+                1,
+                max_pages + 1,
+            ):
+                params = {
+                    "crtfc_key":
+                        settings.dart_api_key,
+
+                    "corp_code":
+                        corp_code,
+
+                    "bgn_de":
+                        begin_date.strftime(
+                            "%Y%m%d"
+                        ),
+
+                    "end_de":
+                        end_date.strftime(
+                            "%Y%m%d"
+                        ),
+
+                    "page_no":
+                        page_no,
+
+                    "page_count":
+                        normalized_page_count,
+                }
+
+                response = await client.get(
+                    f"{self.BASE_URL}/list.json",
+                    params=params,
+                )
+
+                response.raise_for_status()
+
+                payload = response.json()
+
+                status = str(
+                    payload.get(
+                        "status",
+                        "",
+                    )
+                )
+
+                if status == "013":
+                    break
+
+                if status != "000":
+                    raise ExternalApiError(
+                        "OpenDART 공시 조회 실패: "
+                        f"{payload.get('message')} "
+                        f"({status})"
+                    )
+
+                rows = list(
+                    payload.get(
+                        "list"
+                    )
+                    or []
+                )
+
+                all_rows.extend(
+                    rows
+                )
+
+                total_page = int(
+                    payload.get(
+                        "total_page"
+                    )
+                    or 1
+                )
+
+                if page_no >= total_page:
+                    break
+
+                if not rows:
+                    break
+
+        return all_rows
