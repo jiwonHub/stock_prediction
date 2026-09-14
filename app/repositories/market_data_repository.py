@@ -917,6 +917,9 @@ class MarketDataRepository:
                     market_pbr=row.get(
                         "market_pbr"
                     ),
+                    raw_json=row.get(
+                        "raw_json"
+                    ),
                     updated_at=datetime.utcnow(),
                 )
             )

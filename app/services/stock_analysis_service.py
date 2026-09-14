@@ -1979,8 +1979,88 @@ class StockAnalysisService:
             )
         )
 
+        stock = (
+            self.stock_repository
+            .get_stock(
+                stock_code
+            )
+        )
+
+        benchmark_metadata: dict = {}
+
+        if (
+            valuation is not None
+            and isinstance(
+                valuation.raw_json,
+                dict,
+            )
+        ):
+            raw_benchmark_metadata = (
+                valuation.raw_json.get(
+                    "valuation_benchmark"
+                )
+            )
+
+            if isinstance(
+                raw_benchmark_metadata,
+                dict,
+            ):
+                benchmark_metadata = dict(
+                    raw_benchmark_metadata
+                )
+
+        market = str(
+            benchmark_metadata.get(
+                "market"
+            )
+            or (
+                stock.market
+                if stock is not None
+                else ""
+            )
+            or ""
+        ).strip().upper() or None
+
+        minimum_sector_sample_count = int(
+            benchmark_metadata.get(
+                "minimum_sector_sample_count",
+                MarketDataService
+                .MIN_SECTOR_VALUATION_SAMPLES,
+            )
+        )
+
+        minimum_market_sample_count = int(
+            benchmark_metadata.get(
+                "minimum_market_sample_count",
+                MarketDataService
+                .MIN_MARKET_VALUATION_SAMPLES,
+            )
+        )
+
+        def metadata_count(
+            key: str,
+        ) -> int | None:
+            value = benchmark_metadata.get(
+                key
+            )
+
+            if not isinstance(
+                value,
+                (int, float),
+            ):
+                return None
+
+            count = int(value)
+
+            return (
+                count
+                if count >= 0
+                else None
+            )
+
         def build_multiple(
             *,
+            metric: str,
             value: float | None,
             sector_benchmark: float | None,
             market_benchmark: float | None,
@@ -2062,6 +2142,16 @@ class StockAnalysisService:
                         is not None
                         else None
                     ),
+
+                "sectorSampleCount":
+                    metadata_count(
+                        f"sector_{metric}_sample_count"
+                    ),
+
+                "marketSampleCount":
+                    metadata_count(
+                        f"market_{metric}_sample_count"
+                    ),
             }
 
         if valuation is None:
@@ -2082,6 +2172,12 @@ class StockAnalysisService:
                     None,
 
                 "marketRelativePercent":
+                    None,
+                
+                "sectorSampleCount":
+                    None,
+
+                "marketSampleCount":
                     None,
             }
 
@@ -2125,6 +2221,15 @@ class StockAnalysisService:
 
                 "source":
                     None,
+
+                "market":
+                    market,
+
+                "minimumSectorSampleCount":
+                    minimum_sector_sample_count,
+
+                "minimumMarketSampleCount":
+                    minimum_market_sample_count,
             }
 
         return {
@@ -2136,11 +2241,20 @@ class StockAnalysisService:
                 .snapshot_date
                 .isoformat(),
 
+            "market":
+                market,
+
             "sectorCode":
                 valuation.sector_code,
 
             "sectorName":
                 valuation.sector_name,
+
+            "minimumSectorSampleCount":
+                minimum_sector_sample_count,
+
+            "minimumMarketSampleCount":
+                minimum_market_sample_count,
 
             "price":
                 (
@@ -2164,6 +2278,7 @@ class StockAnalysisService:
 
             "per":
                 build_multiple(
+                    metric="per",
                     value=(
                         valuation.per
                     ),
@@ -2177,6 +2292,7 @@ class StockAnalysisService:
 
             "pbr":
                 build_multiple(
+                    metric="pbr",
                     value=(
                         valuation.pbr
                     ),

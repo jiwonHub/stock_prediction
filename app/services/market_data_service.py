@@ -28,6 +28,9 @@ from app.utils.numbers import (
 
 
 class MarketDataService:
+    MIN_SECTOR_VALUATION_SAMPLES = 5
+    MIN_MARKET_VALUATION_SAMPLES = 20
+
     def __init__(
         self,
         db: Session,
@@ -1600,6 +1603,10 @@ class MarketDataService:
                 float,
             ] = {}
 
+            metadata_rows: list[
+                dict
+            ] = []
+
             for raw in raw_universe:
                 stock_code = str(
                     raw.get(
@@ -1611,6 +1618,13 @@ class MarketDataService:
                 market = str(
                     raw.get(
                         "market",
+                        "",
+                    )
+                ).strip()
+
+                sector_code = str(
+                    raw.get(
+                        "sector_large_code",
                         "",
                     )
                 ).strip()
@@ -1638,6 +1652,17 @@ class MarketDataService:
                     )
                 )
 
+                metadata_rows.append(
+                    {
+                        "stock_code":
+                            stock_code,
+                        "market":
+                            market,
+                        "sector_code":
+                            sector_code,
+                    }
+                )
+
                 market_cap_100m = (
                     self._optional_float(
                         raw.get(
@@ -1660,6 +1685,20 @@ class MarketDataService:
 
                 if len(universe) >= limit:
                     break
+
+            metadata_count = (
+                self.stock_repository
+                .update_market_sector_metadata(
+                    metadata_rows
+                )
+            )
+
+            print(
+                "[MARKET] "
+                f"시장/업종 메타데이터 "
+                f"{metadata_count}종목 갱신",
+                flush=True,
+            )
 
             stock_codes = [
                 stock_code
@@ -3070,7 +3109,8 @@ class MarketDataService:
                 )
                 for key, values
                 in sector_per_values.items()
-                if values
+                if len(values)
+                >= self.MIN_SECTOR_VALUATION_SAMPLES
             }
 
             sector_pbr_median = {
@@ -3079,7 +3119,8 @@ class MarketDataService:
                 )
                 for key, values
                 in sector_pbr_values.items()
-                if values
+                if len(values)
+                >= self.MIN_SECTOR_VALUATION_SAMPLES
             }
 
             market_per_median = {
@@ -3088,7 +3129,8 @@ class MarketDataService:
                 )
                 for key, values
                 in market_per_values.items()
-                if values
+                if len(values)
+                >= self.MIN_MARKET_VALUATION_SAMPLES
             }
 
             market_pbr_median = {
@@ -3097,7 +3139,8 @@ class MarketDataService:
                 )
                 for key, values
                 in market_pbr_values.items()
-                if values
+                if len(values)
+                >= self.MIN_MARKET_VALUATION_SAMPLES
             }
 
             update_rows: list[
@@ -3120,6 +3163,74 @@ class MarketDataService:
                     .strip()
                     or "KRX"
                 )
+
+                sector_per_sample_count = (
+                    len(
+                        sector_per_values.get(
+                            sector_key,
+                            [],
+                        )
+                    )
+                    if sector_key
+                    else 0
+                )
+
+                sector_pbr_sample_count = (
+                    len(
+                        sector_pbr_values.get(
+                            sector_key,
+                            [],
+                        )
+                    )
+                    if sector_key
+                    else 0
+                )
+
+                market_per_sample_count = len(
+                    market_per_values.get(
+                        market_key,
+                        [],
+                    )
+                )
+
+                market_pbr_sample_count = len(
+                    market_pbr_values.get(
+                        market_key,
+                        [],
+                    )
+                )
+
+                raw_json = (
+                    dict(
+                        valuation.raw_json
+                    )
+                    if isinstance(
+                        valuation.raw_json,
+                        dict,
+                    )
+                    else {}
+                )
+
+                raw_json[
+                    "valuation_benchmark"
+                ] = {
+                    "market":
+                        market_key,
+                    "sector_key":
+                        sector_key,
+                    "sector_per_sample_count":
+                        sector_per_sample_count,
+                    "sector_pbr_sample_count":
+                        sector_pbr_sample_count,
+                    "market_per_sample_count":
+                        market_per_sample_count,
+                    "market_pbr_sample_count":
+                        market_pbr_sample_count,
+                    "minimum_sector_sample_count":
+                        self.MIN_SECTOR_VALUATION_SAMPLES,
+                    "minimum_market_sample_count":
+                        self.MIN_MARKET_VALUATION_SAMPLES,
+                }
 
                 update_rows.append(
                     {
@@ -3160,6 +3271,9 @@ class MarketDataService:
                             .get(
                                 market_key
                             ),
+
+                        "raw_json":
+                            raw_json,
                     }
                 )
 
@@ -3173,10 +3287,20 @@ class MarketDataService:
             return (
                 updated,
                 len(
-                    sector_per_median
+                    set(
+                        sector_per_median
+                    )
+                    | set(
+                        sector_pbr_median
+                    )
                 ),
                 len(
-                    market_per_median
+                    set(
+                        market_per_median
+                    )
+                    | set(
+                        market_pbr_median
+                    )
                 ),
             )
 

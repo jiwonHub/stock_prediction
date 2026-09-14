@@ -444,6 +444,9 @@ class StockValuationMultipleResponse(
     sectorRelativePercent: float | None
     marketRelativePercent: float | None
 
+    sectorSampleCount: int | None
+    marketSampleCount: int | None
+
 
 class StockValuationAnalysisResponse(
     BaseModel
@@ -451,8 +454,13 @@ class StockValuationAnalysisResponse(
     available: bool
     snapshotDate: str | None
 
+    market: str | None
+
     sectorCode: str | None
     sectorName: str | None
+
+    minimumSectorSampleCount: int
+    minimumMarketSampleCount: int
 
     price: float | None
     marketCap: float | None
