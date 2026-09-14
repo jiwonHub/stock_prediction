@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from datetime import date
 
 import numpy as np
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.models.future import (
@@ -50,12 +50,132 @@ class HistoricalDatasetService:
     ):
         self.db = db
 
+    def get_stock_date_ranges(
+        self,
+        *,
+        feature_version: str,
+        horizon: int,
+    ) -> list[tuple[str, date, date]]:
+        target_column = (
+            self.TARGET_COLUMNS
+            .get(
+                horizon
+            )
+        )
+
+        if target_column is None:
+            raise ValueError(
+                "지원하지 않는 Target horizon입니다: "
+                f"{horizon}"
+            )
+
+        rows = self.db.execute(
+            select(
+                StockFeatureSnapshot.stock_code,
+                func.min(
+                    StockFeatureSnapshot.feature_date
+                ),
+                func.max(
+                    StockFeatureSnapshot.feature_date
+                ),
+            )
+            .where(
+                StockFeatureSnapshot.feature_version
+                == feature_version,
+                target_column.is_not(None),
+            )
+            .group_by(
+                StockFeatureSnapshot.stock_code
+            )
+            .order_by(
+                StockFeatureSnapshot.stock_code.asc()
+            )
+        ).all()
+
+        return [
+            (
+                str(stock_code),
+                first_date,
+                last_date,
+            )
+            for (
+                stock_code,
+                first_date,
+                last_date,
+            )
+            in rows
+            if (
+                first_date is not None
+                and last_date is not None
+            )
+        ]
+
+    def get_stock_date_ranges(
+        self,
+        *,
+        feature_version: str,
+        horizon: int,
+    ) -> list[tuple[str, date, date]]:
+        target_column = (
+            self.TARGET_COLUMNS
+            .get(
+                horizon
+            )
+        )
+
+        if target_column is None:
+            raise ValueError(
+                "지원하지 않는 Target horizon입니다: "
+                f"{horizon}"
+            )
+
+        rows = self.db.execute(
+            select(
+                StockFeatureSnapshot.stock_code,
+                func.min(
+                    StockFeatureSnapshot.feature_date
+                ),
+                func.max(
+                    StockFeatureSnapshot.feature_date
+                ),
+            )
+            .where(
+                StockFeatureSnapshot.feature_version
+                == feature_version,
+                target_column.is_not(None),
+            )
+            .group_by(
+                StockFeatureSnapshot.stock_code
+            )
+            .order_by(
+                StockFeatureSnapshot.stock_code.asc()
+            )
+        ).all()
+
+        return [
+            (
+                str(stock_code),
+                first_date,
+                last_date,
+            )
+            for (
+                stock_code,
+                first_date,
+                last_date,
+            ) in rows
+            if (
+                first_date is not None
+                and last_date is not None
+            )
+        ]
+
     def build_dataset(
         self,
         *,
         feature_version: str,
         horizon: int,
     ) -> HistoricalDatasetBundle:
+
         target_column = (
             self.TARGET_COLUMNS
             .get(

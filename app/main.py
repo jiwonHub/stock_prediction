@@ -7,9 +7,11 @@ import app.models  # noqa: F401 - register all DB models
 
 from app.api.admin import router as admin_router
 from app.api.analysis_admin import router as analysis_admin_router
+from app.api.automation import router as automation_router
 from app.api.financials import router as financials_router
 from app.api.future_context import router as future_context_router
 from app.api.ml import router as ml_router
+from app.api.live_quotes import router as live_quotes_router
 from app.api.ml_admin import router as ml_admin_router
 from app.api.rankings import router as rankings_router
 from app.api.stocks import router as stocks_router
@@ -52,7 +54,9 @@ app.include_router(ml_router, prefix="/v1")
 app.include_router(rankings_router, prefix="/v1")
 app.include_router(admin_router, prefix="/v1")
 app.include_router(analysis_admin_router, prefix="/v1")
+app.include_router(automation_router, prefix="/v1")
 app.include_router(ml_admin_router, prefix="/v1")
+app.include_router(live_quotes_router, prefix="/v1")
 
 
 @app.get("/health")

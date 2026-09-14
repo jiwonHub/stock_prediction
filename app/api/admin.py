@@ -658,6 +658,162 @@ async def stream_top_sector_indices(
     )
 
 @router.post(
+    "/market-context/investor-flows/historical/stream",
+)
+async def stream_historical_investor_flows(
+    feature_version: str = Query(
+        default=HistoricalFeatureService.FEATURE_VERSION,
+        min_length=1,
+        max_length=40,
+    ),
+    horizon: int = Query(
+        default=5,
+        ge=1,
+        le=20,
+    ),
+    offset: int = Query(
+        default=0,
+        ge=0,
+    ),
+    limit: int = Query(
+        default=10,
+        ge=1,
+        le=50,
+    ),
+    lookback_days: int = Query(
+        default=45,
+        ge=30,
+        le=120,
+    ),
+    db: Session = Depends(get_db),
+):
+    market_service = MarketDataService(db)
+    dataset_service = HistoricalDatasetService(db)
+    stock_service = StockService(db)
+
+    async def generate():
+        ranges = dataset_service.get_stock_date_ranges(
+            feature_version=feature_version,
+            horizon=horizon,
+        )
+
+        total_universe = len(ranges)
+
+        selected = ranges[
+            offset:offset + limit
+        ]
+
+        if not selected:
+            yield (
+                "[ERROR] 처리할 Historical 종목이 없습니다. "
+                f"전체 {total_universe}종목, "
+                f"offset={offset}\n"
+            )
+            return
+
+        success = 0
+        failed = 0
+        total_rows = 0
+
+        yield (
+            "[START] Historical Investor Flow "
+            f"전체 {total_universe}종목 중 "
+            f"offset {offset}, "
+            f"{len(selected)}종목 처리\n"
+        )
+
+        try:
+            for index, (
+                stock_code,
+                first_feature_date,
+                last_feature_date,
+            ) in enumerate(
+                selected,
+                start=1,
+            ):
+                stock = stock_service.repository.get_stock(
+                    stock_code
+                )
+
+                stock_name = (
+                    stock.name
+                    if stock is not None
+                    else stock_code
+                )
+
+                start_date = (
+                    first_feature_date
+                    - timedelta(
+                        days=lookback_days,
+                    )
+                )
+
+                end_date = last_feature_date
+
+                yield (
+                    f"[{index}/{len(selected)}] "
+                    f"{stock_code} "
+                    f"{stock_name} "
+                    f"{start_date} ~ "
+                    f"{end_date} 시작\n"
+                )
+
+                try:
+                    count = await (
+                        market_service
+                        .sync_historical_stock_investor_flow(
+                            stock_code,
+                            start_date=start_date,
+                            end_date=end_date,
+                        )
+                    )
+
+                    success += 1
+                    total_rows += count
+
+                    yield (
+                        f"[{index}/{len(selected)}] "
+                        f"{stock_code} 완료: "
+                        f"{count}건\n"
+                    )
+
+                except (
+                    ConfigurationError,
+                    ExternalApiError,
+                    ValueError,
+                ) as e:
+                    db.rollback()
+                    failed += 1
+
+                    yield (
+                        f"[{index}/{len(selected)}] "
+                        f"{stock_code} 실패: "
+                        f"{e}\n"
+                    )
+
+        except asyncio.CancelledError:
+            db.rollback()
+            raise
+
+        yield (
+            "[DONE] "
+            f"성공 {success}종목, "
+            f"실패 {failed}종목, "
+            f"수급 {total_rows}건, "
+            f"다음 offset={offset + len(selected)}\n"
+        )
+
+    return StreamingResponse(
+        generate(),
+        media_type="text/plain; charset=utf-8",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+@router.post(
     "/market-context/stock-prices/stream",
 )
 async def stream_top_stock_prices(

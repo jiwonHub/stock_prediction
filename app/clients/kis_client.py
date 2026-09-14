@@ -44,6 +44,12 @@ class KisClient:
     )
     INVESTOR_TR_ID = "FHKST01010900"
 
+    HISTORICAL_INVESTOR_PATH = (
+        "/uapi/domestic-stock/v1/quotations/"
+        "investor-trade-by-stock-daily"
+    )
+    HISTORICAL_INVESTOR_TR_ID = "FHPTJ04160001"
+
     MARKET_CAP_PATH = (
         "/uapi/domestic-stock/v1/ranking/"
         "market-cap"
@@ -705,6 +711,153 @@ class KisClient:
             )
 
         return result
+
+    async def get_historical_investor_flows(
+        self,
+        stock_code: str,
+        *,
+        start_date: date,
+        end_date: date,
+    ) -> list[dict[str, Any]]:
+        if start_date > end_date:
+            raise ValueError(
+                "start_date는 end_date보다 늦을 수 없습니다."
+            )
+
+        unique_rows: dict[
+            str,
+            dict[str, Any],
+        ] = {}
+
+        current_end = end_date
+        page = 0
+
+        while current_end >= start_date:
+            page += 1
+
+            print(
+                "[KIS FLOW] "
+                f"{stock_code} "
+                f"{page}페이지 "
+                f"기준일 {current_end}",
+                flush=True,
+            )
+
+            payload = await self._get(
+                path=(
+                    self
+                    .HISTORICAL_INVESTOR_PATH
+                ),
+                tr_id=(
+                    self
+                    .HISTORICAL_INVESTOR_TR_ID
+                ),
+                params={
+                    "FID_COND_MRKT_DIV_CODE": (
+                        settings
+                        .kis_market_div_code
+                    ),
+                    "FID_INPUT_ISCD": (
+                        stock_code
+                    ),
+                    "FID_INPUT_DATE_1": (
+                        current_end
+                        .strftime(
+                            "%Y%m%d"
+                        )
+                    ),
+                    "FID_ORG_ADJ_PRC": "",
+                    "FID_ETC_CLS_CODE": "",
+                },
+            )
+
+            output = (
+                payload.get(
+                    "output2"
+                )
+                or payload.get(
+                    "output1"
+                )
+                or []
+            )
+
+            if isinstance(
+                output,
+                dict,
+            ):
+                output = [output]
+
+            page_dates: list[date] = []
+
+            for row in output:
+                if not isinstance(
+                    row,
+                    dict,
+                ):
+                    continue
+
+                date_text = str(
+                    row.get(
+                        "stck_bsop_date",
+                        "",
+                    )
+                ).strip()
+
+                if len(date_text) != 8:
+                    continue
+
+                try:
+                    trade_date = (
+                        datetime
+                        .strptime(
+                            date_text,
+                            "%Y%m%d",
+                        )
+                        .date()
+                    )
+                except ValueError:
+                    continue
+
+                page_dates.append(
+                    trade_date
+                )
+
+                if (
+                    start_date
+                    <= trade_date
+                    <= end_date
+                ):
+                    unique_rows[
+                        date_text
+                    ] = dict(row)
+
+            if not page_dates:
+                break
+
+            oldest_date = min(
+                page_dates
+            )
+
+            if oldest_date <= start_date:
+                break
+
+            next_end = (
+                oldest_date
+                - timedelta(days=1)
+            )
+
+            if next_end >= current_end:
+                break
+
+            current_end = next_end
+
+        return [
+            unique_rows[key]
+            for key
+            in sorted(
+                unique_rows
+            )
+        ]
 
     async def get_intraday_prices(
         self,

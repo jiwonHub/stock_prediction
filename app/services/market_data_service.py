@@ -8,6 +8,7 @@ from app.clients.kis_master_client import (
 )
 from app.clients.ecos_client import ecos_client
 from app.clients.kis_client import kis_client
+from app.clients.toss_client import toss_client
 from app.core.exceptions import (
     ConfigurationError,
     ExternalApiError,
@@ -40,6 +41,1199 @@ class MarketDataService:
         self.stock_repository = (
             StockRepository(db)
         )
+
+    async def sync_toss_market_indices(
+        self,
+        *,
+        count: int = 200,
+    ) -> int:
+        symbols = [
+            "KOSPI",
+            "KOSDAQ",
+        ]
+
+        definitions = {
+            "KOSPI": (
+                "0001",
+                "KOSPI",
+                "KOSPI",
+            ),
+            "KOSDAQ": (
+                "1001",
+                "KOSDAQ",
+                "KOSDAQ",
+            ),
+        }
+
+        current_rows = (
+            await toss_client
+            .get_market_indicator_prices(
+                symbols
+            )
+        )
+
+        current_prices = {
+            str(
+                row.get(
+                    "symbol",
+                    "",
+                )
+            ).strip().upper():
+                self._optional_float(
+                    row.get(
+                        "lastPrice"
+                    )
+                )
+            for row in current_rows
+            if isinstance(
+                row,
+                dict,
+            )
+        }
+
+        total_count = 0
+
+        for symbol in symbols:
+            payload = (
+                await toss_client
+                .get_market_indicator_candles(
+                    symbol,
+                    interval="1d",
+                    count=count,
+                )
+            )
+
+            (
+                index_code,
+                index_name,
+                market,
+            ) = definitions[symbol]
+
+            parsed_rows: list[
+                dict
+            ] = []
+
+            for raw in payload.get(
+                "candles",
+                [],
+            ):
+                trade_date = (
+                    self._parse_iso_date(
+                        raw.get(
+                            "timestamp"
+                        )
+                    )
+                )
+
+                close = (
+                    self._optional_float(
+                        raw.get(
+                            "closePrice"
+                        )
+                    )
+                )
+
+                if (
+                    trade_date is None
+                    or close is None
+                    or close <= 0
+                ):
+                    continue
+
+                parsed_rows.append(
+                    {
+                        "index_code":
+                            index_code,
+                        "index_name":
+                            index_name,
+                        "market":
+                            market,
+                        "trade_date":
+                            trade_date,
+                        "open":
+                            self._optional_float(
+                                raw.get(
+                                    "openPrice"
+                                )
+                            ),
+                        "high":
+                            self._optional_float(
+                                raw.get(
+                                    "highPrice"
+                                )
+                            ),
+                        "low":
+                            self._optional_float(
+                                raw.get(
+                                    "lowPrice"
+                                )
+                            ),
+                        "close":
+                            close,
+                        "change":
+                            None,
+                        "change_rate":
+                            None,
+                        "volume":
+                            to_int(
+                                raw.get(
+                                    "volume"
+                                )
+                            ),
+                        "trading_value":
+                            None,
+                        "source":
+                            "TOSS",
+                        "raw_json":
+                            dict(raw),
+                    }
+                )
+
+            today = date.today()
+
+            live_price = (
+                current_prices.get(
+                    symbol
+                )
+            )
+
+            if (
+                live_price is not None
+                and live_price > 0
+            ):
+                today_row = next(
+                    (
+                        row
+                        for row
+                        in parsed_rows
+                        if row[
+                            "trade_date"
+                        ] == today
+                    ),
+                    None,
+                )
+
+                if today_row is not None:
+                    today_row[
+                        "close"
+                    ] = live_price
+
+                    today_row[
+                        "raw_json"
+                    ] = {
+                        **today_row[
+                            "raw_json"
+                        ],
+                        "livePrice":
+                            live_price,
+                    }
+
+                else:
+                    parsed_rows.append(
+                        {
+                            "index_code":
+                                index_code,
+                            "index_name":
+                                index_name,
+                            "market":
+                                market,
+                            "trade_date":
+                                today,
+                            "open":
+                                None,
+                            "high":
+                                None,
+                            "low":
+                                None,
+                            "close":
+                                live_price,
+                            "change":
+                                None,
+                            "change_rate":
+                                None,
+                            "volume":
+                                None,
+                            "trading_value":
+                                None,
+                            "source":
+                                "TOSS",
+                            "raw_json": {
+                                "symbol":
+                                    symbol,
+                                "lastPrice":
+                                    live_price,
+                                "provisional":
+                                    True,
+                            },
+                        }
+                    )
+
+            parsed_rows.sort(
+                key=lambda row: (
+                    row[
+                        "trade_date"
+                    ]
+                )
+            )
+
+            self._apply_index_changes(
+                parsed_rows
+            )
+
+            total_count += (
+                self.repository
+                .upsert_market_index_prices(
+                    parsed_rows
+                )
+            )
+
+        return total_count
+
+    async def sync_toss_market_investor_flows(
+        self,
+        *,
+        count: int = 60,
+    ) -> int:
+        total_count = 0
+
+        for market in (
+            "KOSPI",
+            "KOSDAQ",
+        ):
+            payload = (
+                await toss_client
+                .get_market_indicator_investor_trading(
+                    market,
+                    interval="1d",
+                    count=count,
+                )
+            )
+
+            rows: list[
+                dict
+            ] = []
+
+            for raw in payload.get(
+                "records",
+                [],
+            ):
+                trade_date = (
+                    self._parse_iso_date(
+                        raw.get(
+                            "date"
+                        )
+                    )
+                )
+
+                if trade_date is None:
+                    continue
+
+                individual = (
+                    raw.get(
+                        "individual"
+                    )
+                    if isinstance(
+                        raw.get(
+                            "individual"
+                        ),
+                        dict,
+                    )
+                    else {}
+                )
+
+                foreigner = (
+                    raw.get(
+                        "foreigner"
+                    )
+                    if isinstance(
+                        raw.get(
+                            "foreigner"
+                        ),
+                        dict,
+                    )
+                    else {}
+                )
+
+                institution = (
+                    raw.get(
+                        "institution"
+                    )
+                    if isinstance(
+                        raw.get(
+                            "institution"
+                        ),
+                        dict,
+                    )
+                    else {}
+                )
+
+                other_corporation = (
+                    raw.get(
+                        "otherCorporation"
+                    )
+                    if isinstance(
+                        raw.get(
+                            "otherCorporation"
+                        ),
+                        dict,
+                    )
+                    else {}
+                )
+
+                breakdown = (
+                    institution.get(
+                        "breakdown"
+                    )
+                )
+
+                rows.append(
+                    {
+                        "market":
+                            market,
+                        "trade_date":
+                            trade_date,
+
+                        "individual_buy_amount":
+                            to_decimal_or_none(
+                                individual.get(
+                                    "buyAmount"
+                                )
+                            ),
+
+                        "individual_sell_amount":
+                            to_decimal_or_none(
+                                individual.get(
+                                    "sellAmount"
+                                )
+                            ),
+
+                        "foreign_buy_amount":
+                            to_decimal_or_none(
+                                foreigner.get(
+                                    "buyAmount"
+                                )
+                            ),
+
+                        "foreign_sell_amount":
+                            to_decimal_or_none(
+                                foreigner.get(
+                                    "sellAmount"
+                                )
+                            ),
+
+                        "institution_buy_amount":
+                            to_decimal_or_none(
+                                institution.get(
+                                    "buyAmount"
+                                )
+                            ),
+
+                        "institution_sell_amount":
+                            to_decimal_or_none(
+                                institution.get(
+                                    "sellAmount"
+                                )
+                            ),
+
+                        "other_corporation_buy_amount":
+                            to_decimal_or_none(
+                                other_corporation.get(
+                                    "buyAmount"
+                                )
+                            ),
+
+                        "other_corporation_sell_amount":
+                            to_decimal_or_none(
+                                other_corporation.get(
+                                    "sellAmount"
+                                )
+                            ),
+
+                        "institution_breakdown_json":
+                            (
+                                dict(
+                                    breakdown
+                                )
+                                if isinstance(
+                                    breakdown,
+                                    dict,
+                                )
+                                else None
+                            ),
+
+                        "source":
+                            "TOSS",
+
+                        "raw_json":
+                            dict(raw),
+                    }
+                )
+
+            total_count += (
+                self.repository
+                .upsert_market_investor_flows(
+                    rows
+                )
+            )
+
+        return total_count
+
+    async def sync_toss_usd_krw(
+        self,
+    ) -> int:
+        raw = (
+            await toss_client
+            .get_exchange_rate(
+                base_currency="USD",
+                quote_currency="KRW",
+            )
+        )
+
+        rate = (
+            self._optional_float(
+                raw.get(
+                    "rate"
+                )
+            )
+        )
+
+        if (
+            rate is None
+            or rate <= 0
+        ):
+            return 0
+
+        observed_date = (
+            self._parse_iso_date(
+                raw.get(
+                    "validFrom"
+                )
+            )
+            or date.today()
+        )
+
+        return (
+            self.repository
+            .upsert_macro_indicators(
+                [
+                    {
+                        "indicator_code":
+                            "USD_KRW",
+
+                        "indicator_name":
+                            "원/달러 환율",
+
+                        "indicator_type":
+                            "fx",
+
+                        "frequency":
+                            "D",
+
+                        "observed_date":
+                            observed_date,
+
+                        "value":
+                            rate,
+
+                        "unit":
+                            "KRW/USD",
+
+                        "source":
+                            "TOSS",
+
+                        "metadata_json":
+                            dict(raw),
+                    }
+                ]
+            )
+        )
+
+    async def sync_toss_market_context(
+        self,
+        *,
+        index_count: int = 200,
+        investor_count: int = 60,
+    ) -> dict:
+        index_rows = (
+            await self
+            .sync_toss_market_indices(
+                count=index_count,
+            )
+        )
+
+        investor_rows = (
+            await self
+            .sync_toss_market_investor_flows(
+                count=investor_count,
+            )
+        )
+
+        fx_rows = (
+            await self
+            .sync_toss_usd_krw()
+        )
+
+        return {
+            "indexRows":
+                index_rows,
+            "investorRows":
+                investor_rows,
+            "fxRows":
+                fx_rows,
+        }
+
+    @staticmethod
+    def _calculate_index_return(
+        history: list[dict],
+        sessions: int,
+    ) -> float | None:
+        if len(history) <= sessions:
+            return None
+
+        latest_close = history[-1].get(
+            "close"
+        )
+
+        base_close = history[
+            -(sessions + 1)
+        ].get(
+            "close"
+        )
+
+        if (
+            latest_close is None
+            or base_close is None
+            or base_close <= 0
+        ):
+            return None
+
+        return (
+            (
+                latest_close
+                / base_close
+                - 1.0
+            )
+            * 100.0
+        )
+
+    @staticmethod
+    def _build_investor_period_summary(
+        history: list[dict],
+        sessions: int,
+    ) -> dict:
+        if len(history) < sessions:
+            return {
+                "sessionCount":
+                    len(history),
+                "individualNet":
+                    None,
+                "foreignNet":
+                    None,
+                "institutionNet":
+                    None,
+                "otherCorporationNet":
+                    None,
+            }
+
+        selected = history[
+            -sessions:
+        ]
+
+        def sum_net(
+            key: str,
+        ) -> float:
+            return float(
+                sum(
+                    float(
+                        row.get(
+                            key,
+                            {},
+                        ).get(
+                            "netAmount",
+                            0.0,
+                        )
+                        or 0.0
+                    )
+                    for row in selected
+                )
+            )
+
+        return {
+            "sessionCount":
+                sessions,
+            "individualNet":
+                sum_net(
+                    "individual"
+                ),
+            "foreignNet":
+                sum_net(
+                    "foreign"
+                ),
+            "institutionNet":
+                sum_net(
+                    "institution"
+                ),
+            "otherCorporationNet":
+                sum_net(
+                    "otherCorporation"
+                ),
+        }
+
+    @staticmethod
+    def _build_fx_summary(
+        history: list[dict],
+    ) -> dict:
+        if not history:
+            return {
+                "observedDate": None,
+                "value": None,
+                "previousObservedDate": None,
+                "previousValue": None,
+                "change": None,
+                "changeRate": None,
+                "unit": None,
+                "source": None,
+            }
+
+        latest = history[-1]
+
+        previous = (
+            history[-2]
+            if len(history) >= 2
+            else None
+        )
+
+        latest_value = latest.get(
+            "value"
+        )
+
+        previous_value = (
+            previous.get(
+                "value"
+            )
+            if previous
+            else None
+        )
+
+        change = None
+        change_rate = None
+
+        if (
+            latest_value is not None
+            and previous_value is not None
+        ):
+            change = (
+                float(latest_value)
+                - float(previous_value)
+            )
+
+            if float(
+                previous_value
+            ) != 0:
+                change_rate = (
+                    change
+                    / float(
+                        previous_value
+                    )
+                    * 100.0
+                )
+
+        return {
+            "observedDate":
+                latest.get(
+                    "observedDate"
+                ),
+            "value":
+                latest_value,
+            "previousObservedDate": (
+                previous.get(
+                    "observedDate"
+                )
+                if previous
+                else None
+            ),
+            "previousValue":
+                previous_value,
+            "change":
+                change,
+            "changeRate":
+                change_rate,
+            "unit":
+                latest.get(
+                    "unit"
+                ),
+            "source":
+                latest.get(
+                    "source"
+                ),
+        }
+
+    def get_toss_market_context_summary(
+        self,
+        *,
+        days: int = 30,
+    ) -> dict:
+        end_date = date.today()
+
+        start_date = (
+            end_date
+            - timedelta(
+                days=days
+            )
+        )
+
+        indices = {}
+
+        for (
+            market,
+            index_code,
+        ) in (
+            (
+                "KOSPI",
+                "0001",
+            ),
+            (
+                "KOSDAQ",
+                "1001",
+            ),
+        ):
+            rows = (
+                self.repository
+                .get_market_index_prices(
+                    index_code=index_code,
+                    start_date=start_date,
+                    end_date=end_date,
+                )
+            )
+
+            history = [
+                {
+                    "tradeDate":
+                        row.trade_date.isoformat(),
+                    "open":
+                        row.open,
+                    "high":
+                        row.high,
+                    "low":
+                        row.low,
+                    "close":
+                        row.close,
+                    "change":
+                        row.change,
+                    "changeRate":
+                        row.change_rate,
+                    "volume":
+                        row.volume,
+                    "source":
+                        row.source,
+                }
+                for row in rows
+            ]
+
+            latest = (
+                history[-1]
+                if history
+                else None
+            )
+
+            indices[
+                market
+            ] = {
+                "latest":
+                    latest,
+                "history":
+                    history,
+            }
+
+        investor_flows = {}
+
+        for market in (
+            "KOSPI",
+            "KOSDAQ",
+        ):
+            rows = (
+                self.repository
+                .get_market_investor_flows(
+                    market=market,
+                    start_date=start_date,
+                    end_date=end_date,
+                )
+            )
+
+            history = []
+
+            for row in rows:
+                individual_buy = (
+                    float(
+                        row.individual_buy_amount
+                    )
+                    if row.individual_buy_amount
+                    is not None
+                    else None
+                )
+
+                individual_sell = (
+                    float(
+                        row.individual_sell_amount
+                    )
+                    if row.individual_sell_amount
+                    is not None
+                    else None
+                )
+
+                foreign_buy = (
+                    float(
+                        row.foreign_buy_amount
+                    )
+                    if row.foreign_buy_amount
+                    is not None
+                    else None
+                )
+
+                foreign_sell = (
+                    float(
+                        row.foreign_sell_amount
+                    )
+                    if row.foreign_sell_amount
+                    is not None
+                    else None
+                )
+
+                institution_buy = (
+                    float(
+                        row.institution_buy_amount
+                    )
+                    if row.institution_buy_amount
+                    is not None
+                    else None
+                )
+
+                institution_sell = (
+                    float(
+                        row.institution_sell_amount
+                    )
+                    if row.institution_sell_amount
+                    is not None
+                    else None
+                )
+
+                other_buy = (
+                    float(
+                        row.other_corporation_buy_amount
+                    )
+                    if row.other_corporation_buy_amount
+                    is not None
+                    else None
+                )
+
+                other_sell = (
+                    float(
+                        row.other_corporation_sell_amount
+                    )
+                    if row.other_corporation_sell_amount
+                    is not None
+                    else None
+                )
+
+                history.append(
+                    {
+                        "tradeDate":
+                            row.trade_date.isoformat(),
+                        "individual": {
+                            "buyAmount":
+                                individual_buy,
+                            "sellAmount":
+                                individual_sell,
+                            "netAmount": (
+                                individual_buy
+                                - individual_sell
+                                if (
+                                    individual_buy
+                                    is not None
+                                    and individual_sell
+                                    is not None
+                                )
+                                else None
+                            ),
+                        },
+                        "foreign": {
+                            "buyAmount":
+                                foreign_buy,
+                            "sellAmount":
+                                foreign_sell,
+                            "netAmount": (
+                                foreign_buy
+                                - foreign_sell
+                                if (
+                                    foreign_buy
+                                    is not None
+                                    and foreign_sell
+                                    is not None
+                                )
+                                else None
+                            ),
+                        },
+                        "institution": {
+                            "buyAmount":
+                                institution_buy,
+                            "sellAmount":
+                                institution_sell,
+                            "netAmount": (
+                                institution_buy
+                                - institution_sell
+                                if (
+                                    institution_buy
+                                    is not None
+                                    and institution_sell
+                                    is not None
+                                )
+                                else None
+                            ),
+                            "breakdown":
+                                row.institution_breakdown_json,
+                        },
+                        "otherCorporation": {
+                            "buyAmount":
+                                other_buy,
+                            "sellAmount":
+                                other_sell,
+                            "netAmount": (
+                                other_buy
+                                - other_sell
+                                if (
+                                    other_buy
+                                    is not None
+                                    and other_sell
+                                    is not None
+                                )
+                                else None
+                            ),
+                        },
+                        "source":
+                            row.source,
+                    }
+                )
+
+            investor_flows[
+                market
+            ] = {
+                "latest": (
+                    history[-1]
+                    if history
+                    else None
+                ),
+                "history":
+                    history,
+            }
+
+        fx_rows = (
+            self.repository
+            .get_macro_indicators(
+                indicator_code="USD_KRW",
+                start_date=start_date,
+                end_date=end_date,
+            )
+        )
+
+        fx_history = [
+            {
+                "observedDate":
+                    row.observed_date.isoformat(),
+                "value":
+                    row.value,
+                "unit":
+                    row.unit,
+                "source":
+                    row.source,
+            }
+            for row in fx_rows
+        ]
+
+        market_summary = {
+            "indices": {},
+            "investorFlows": {},
+            "usdKrw": (
+                self._build_fx_summary(
+                    fx_history
+                )
+            ),
+        }
+
+        for market in (
+            "KOSPI",
+            "KOSDAQ",
+        ):
+            index_history = (
+                indices.get(
+                    market,
+                    {},
+                ).get(
+                    "history",
+                    [],
+                )
+            )
+
+            latest_index = (
+                index_history[-1]
+                if index_history
+                else None
+            )
+
+            market_summary[
+                "indices"
+            ][market] = {
+                "tradeDate": (
+                    latest_index.get(
+                        "tradeDate"
+                    )
+                    if latest_index
+                    else None
+                ),
+                "close": (
+                    latest_index.get(
+                        "close"
+                    )
+                    if latest_index
+                    else None
+                ),
+                "dailyChangeRate": (
+                    latest_index.get(
+                        "changeRate"
+                    )
+                    if latest_index
+                    else None
+                ),
+                "return5d": (
+                    self._calculate_index_return(
+                        index_history,
+                        5,
+                    )
+                ),
+                "return20d": (
+                    self._calculate_index_return(
+                        index_history,
+                        20,
+                    )
+                ),
+                "source": (
+                    latest_index.get(
+                        "source"
+                    )
+                    if latest_index
+                    else None
+                ),
+            }
+
+            investor_history = (
+                investor_flows.get(
+                    market,
+                    {},
+                ).get(
+                    "history",
+                    [],
+                )
+            )
+
+            latest_flow = (
+                investor_history[-1]
+                if investor_history
+                else None
+            )
+
+            market_summary[
+                "investorFlows"
+            ][market] = {
+                "tradeDate": (
+                    latest_flow.get(
+                        "tradeDate"
+                    )
+                    if latest_flow
+                    else None
+                ),
+                "latest": {
+                    "individualNet": (
+                        latest_flow.get(
+                            "individual",
+                            {},
+                        ).get(
+                            "netAmount"
+                        )
+                        if latest_flow
+                        else None
+                    ),
+                    "foreignNet": (
+                        latest_flow.get(
+                            "foreign",
+                            {},
+                        ).get(
+                            "netAmount"
+                        )
+                        if latest_flow
+                        else None
+                    ),
+                    "institutionNet": (
+                        latest_flow.get(
+                            "institution",
+                            {},
+                        ).get(
+                            "netAmount"
+                        )
+                        if latest_flow
+                        else None
+                    ),
+                    "otherCorporationNet": (
+                        latest_flow.get(
+                            "otherCorporation",
+                            {},
+                        ).get(
+                            "netAmount"
+                        )
+                        if latest_flow
+                        else None
+                    ),
+                },
+                "fiveDays": (
+                    self._build_investor_period_summary(
+                        investor_history,
+                        5,
+                    )
+                ),
+                "twentyDays": (
+                    self._build_investor_period_summary(
+                        investor_history,
+                        20,
+                    )
+                ),
+                "source": (
+                    latest_flow.get(
+                        "source"
+                    )
+                    if latest_flow
+                    else None
+                ),
+            }
+
+        return {
+            "asOf":
+                end_date.isoformat(),
+            "days":
+                days,
+            "summary":
+                market_summary,
+            "indices":
+                indices,
+            "investorFlows":
+                investor_flows,
+            "usdKrw": {
+                "latest": (
+                    fx_history[-1]
+                    if fx_history
+                    else None
+                ),
+                "history":
+                    fx_history,
+            },
+        }
 
     async def sync_market_context(
         self,
@@ -401,6 +1595,11 @@ class MarketDataService:
                 tuple[str, str]
             ] = []
 
+            market_cap_by_code: dict[
+                str,
+                float,
+            ] = {}
+
             for raw in raw_universe:
                 stock_code = str(
                     raw.get(
@@ -438,6 +1637,26 @@ class MarketDataService:
                         market,
                     )
                 )
+
+                market_cap_100m = (
+                    self._optional_float(
+                        raw.get(
+                            "market_cap_100m"
+                        )
+                    )
+                )
+
+                if (
+                    market_cap_100m
+                    is not None
+                    and market_cap_100m > 0.0
+                ):
+                    market_cap_by_code[
+                        stock_code
+                    ] = (
+                        market_cap_100m
+                        * 100_000_000.0
+                    )
 
                 if len(universe) >= limit:
                     break
@@ -551,6 +1770,12 @@ class MarketDataService:
                         .sync_stock_valuation(
                             stock_code,
                             market_override=market,
+                            market_cap_override=(
+                                market_cap_by_code
+                                .get(
+                                    stock_code
+                                )
+                            ),
                         )
                     )
 
@@ -603,6 +1828,164 @@ class MarketDataService:
         self,
         stock_code: str,
     ) -> int:
+        try:
+            result = (
+                await toss_client
+                .get_investor_trading(
+                    stock_code,
+                    count=65,
+                )
+            )
+
+            parsed_rows: list[
+                dict
+            ] = []
+
+            for raw in result[
+                "records"
+            ]:
+                try:
+                    trade_date = (
+                        date.fromisoformat(
+                            str(
+                                raw.get(
+                                    "date"
+                                )
+                                or ""
+                            )
+                        )
+                    )
+                except ValueError:
+                    continue
+
+                individual = raw.get(
+                    "individual"
+                )
+
+                foreigner = raw.get(
+                    "foreigner"
+                )
+
+                institution = raw.get(
+                    "institution"
+                )
+
+                if not (
+                    isinstance(
+                        individual,
+                        dict,
+                    )
+                    and isinstance(
+                        foreigner,
+                        dict,
+                    )
+                    and isinstance(
+                        institution,
+                        dict,
+                    )
+                ):
+                    continue
+
+                if (
+                    individual.get(
+                        "netBuyVolume"
+                    )
+                    is None
+                    or foreigner.get(
+                        "netBuyVolume"
+                    )
+                    is None
+                    or institution.get(
+                        "netBuyVolume"
+                    )
+                    is None
+                ):
+                    continue
+
+                foreign_holding = raw.get(
+                    "foreignerHolding"
+                )
+
+                holding_rate = None
+
+                if isinstance(
+                    foreign_holding,
+                    dict,
+                ):
+                    holding_rate = (
+                        self._optional_float(
+                            foreign_holding.get(
+                                "holdingRate"
+                            )
+                        )
+                    )
+
+                parsed_rows.append(
+                    {
+                        "stock_code":
+                            stock_code,
+
+                        "trade_date":
+                            trade_date,
+
+                        "foreign_net_buy_volume":
+                            to_int(
+                                foreigner.get(
+                                    "netBuyVolume"
+                                )
+                            ),
+
+                        "institution_net_buy_volume":
+                            to_int(
+                                institution.get(
+                                    "netBuyVolume"
+                                )
+                            ),
+
+                        "individual_net_buy_volume":
+                            to_int(
+                                individual.get(
+                                    "netBuyVolume"
+                                )
+                            ),
+
+                        "foreign_holding_ratio":
+                            holding_rate,
+
+                        "source":
+                            "TOSS",
+
+                        "raw_json":
+                            dict(raw),
+                    }
+                )
+
+            if parsed_rows:
+                print(
+                    "[MARKET][TOSS-FLOW] "
+                    f"{stock_code} "
+                    f"rows={len(parsed_rows)}",
+                    flush=True,
+                )
+
+                return (
+                    self.repository
+                    .upsert_toss_stock_investor_flows(
+                        parsed_rows
+                    )
+                )
+
+        except (
+            ConfigurationError,
+            ExternalApiError,
+        ) as e:
+            print(
+                "[MARKET][TOSS-FLOW] "
+                f"{stock_code} "
+                f"fallback=KIS error={e}",
+                flush=True,
+            )
+
         raw_rows = (
             await kis_client
             .get_investor_flows(
@@ -610,9 +1993,7 @@ class MarketDataService:
             )
         )
 
-        parsed_rows: list[
-            dict
-        ] = []
+        parsed_rows = []
 
         for raw in raw_rows:
             trade_date = (
@@ -630,6 +2011,7 @@ class MarketDataService:
                 {
                     "stock_code":
                         stock_code,
+
                     "trade_date":
                         trade_date,
 
@@ -675,8 +2057,511 @@ class MarketDataService:
                             )
                         ),
 
-                    # 현재 투자자 API에서는
-                    # 보유비율을 직접 쓰지 않는다.
+                    "foreign_holding_ratio":
+                        None,
+
+                    "source":
+                        "KIS",
+
+                    "raw_json":
+                        dict(raw),
+                }
+            )
+
+        return (
+            self.repository
+            .upsert_stock_investor_flows(
+                parsed_rows
+            )
+        )
+
+    async def sync_stock_trading_trends(
+        self,
+        stock_code: str,
+        *,
+        count: int = 60,
+    ) -> dict[str, int]:
+        stock = (
+            self.stock_repository
+            .get_stock(
+                stock_code
+            )
+        )
+
+        if stock is None:
+            raise ValueError(
+                "등록되지 않은 종목입니다: "
+                f"{stock_code}"
+            )
+
+        program_result = (
+            await toss_client
+            .get_program_trades(
+                stock_code,
+                count=count,
+            )
+        )
+
+        short_result = (
+            await toss_client
+            .get_short_selling(
+                stock_code,
+                count=count,
+            )
+        )
+
+        credit_result = (
+            await toss_client
+            .get_credit_trades(
+                stock_code,
+                count=count,
+            )
+        )
+
+        lending_result = (
+            await toss_client
+            .get_securities_lending(
+                stock_code,
+                count=count,
+            )
+        )
+
+        program_rows: list[dict] = []
+
+        for raw in program_result["records"]:
+            try:
+                trade_date = date.fromisoformat(
+                    str(
+                        raw.get(
+                            "date"
+                        )
+                        or ""
+                    )
+                )
+            except ValueError:
+                continue
+
+            arbitrage = raw.get(
+                "arbitrage"
+            )
+
+            non_arbitrage = raw.get(
+                "nonArbitrage"
+            )
+
+            if not (
+                isinstance(
+                    arbitrage,
+                    dict,
+                )
+                and isinstance(
+                    non_arbitrage,
+                    dict,
+                )
+            ):
+                continue
+
+            program_rows.append(
+                {
+                    "stock_code":
+                        stock_code,
+                    "trade_date":
+                        trade_date,
+
+                    "arbitrage_buy_volume":
+                        to_int(
+                            arbitrage.get(
+                                "buyVolume"
+                            )
+                        ),
+                    "arbitrage_sell_volume":
+                        to_int(
+                            arbitrage.get(
+                                "sellVolume"
+                            )
+                        ),
+                    "arbitrage_net_buy_volume":
+                        to_int(
+                            arbitrage.get(
+                                "netBuyVolume"
+                            )
+                        ),
+
+                    "non_arbitrage_buy_volume":
+                        to_int(
+                            non_arbitrage.get(
+                                "buyVolume"
+                            )
+                        ),
+                    "non_arbitrage_sell_volume":
+                        to_int(
+                            non_arbitrage.get(
+                                "sellVolume"
+                            )
+                        ),
+                    "non_arbitrage_net_buy_volume":
+                        to_int(
+                            non_arbitrage.get(
+                                "netBuyVolume"
+                            )
+                        ),
+
+                    "source":
+                        "TOSS",
+                    "raw_json":
+                        dict(raw),
+                }
+            )
+
+        short_rows: list[dict] = []
+
+        for raw in short_result["records"]:
+            try:
+                trade_date = date.fromisoformat(
+                    str(
+                        raw.get(
+                            "date"
+                        )
+                        or ""
+                    )
+                )
+            except ValueError:
+                continue
+
+            short_rows.append(
+                {
+                    "stock_code":
+                        stock_code,
+                    "trade_date":
+                        trade_date,
+
+                    "short_selling_volume":
+                        to_int(
+                            raw.get(
+                                "shortSellingVolume"
+                            )
+                        ),
+                    "short_selling_amount":
+                        to_int(
+                            raw.get(
+                                "shortSellingAmount"
+                            )
+                        ),
+                    "short_selling_volume_rate":
+                        self._optional_float(
+                            raw.get(
+                                "shortSellingVolumeRate"
+                            )
+                        ),
+                    "short_selling_amount_rate":
+                        self._optional_float(
+                            raw.get(
+                                "shortSellingAmountRate"
+                            )
+                        ),
+
+                    "source":
+                        "TOSS",
+                    "raw_json":
+                        dict(raw),
+                }
+            )
+
+        credit_rows: list[dict] = []
+
+        for raw in credit_result["records"]:
+            try:
+                trade_date = date.fromisoformat(
+                    str(
+                        raw.get(
+                            "date"
+                        )
+                        or ""
+                    )
+                )
+            except ValueError:
+                continue
+
+            margin_loan = raw.get(
+                "marginLoan"
+            )
+
+            stock_loan = raw.get(
+                "stockLoan"
+            )
+
+            if not (
+                isinstance(
+                    margin_loan,
+                    dict,
+                )
+                and isinstance(
+                    stock_loan,
+                    dict,
+                )
+            ):
+                continue
+
+            credit_rows.append(
+                {
+                    "stock_code":
+                        stock_code,
+                    "trade_date":
+                        trade_date,
+
+                    "margin_loan_new_quantity":
+                        to_int(
+                            margin_loan.get(
+                                "newQuantity"
+                            )
+                        ),
+                    "margin_loan_return_quantity":
+                        to_int(
+                            margin_loan.get(
+                                "returnQuantity"
+                            )
+                        ),
+                    "margin_loan_balance_quantity":
+                        to_int(
+                            margin_loan.get(
+                                "balanceQuantity"
+                            )
+                        ),
+                    "margin_loan_balance_rate":
+                        self._optional_float(
+                            margin_loan.get(
+                                "balanceRate"
+                            )
+                        ),
+                    "margin_loan_trading_rate":
+                        self._optional_float(
+                            margin_loan.get(
+                                "tradingRate"
+                            )
+                        ),
+
+                    "stock_loan_new_quantity":
+                        to_int(
+                            stock_loan.get(
+                                "newQuantity"
+                            )
+                        ),
+                    "stock_loan_return_quantity":
+                        to_int(
+                            stock_loan.get(
+                                "returnQuantity"
+                            )
+                        ),
+                    "stock_loan_balance_quantity":
+                        to_int(
+                            stock_loan.get(
+                                "balanceQuantity"
+                            )
+                        ),
+                    "stock_loan_balance_rate":
+                        self._optional_float(
+                            stock_loan.get(
+                                "balanceRate"
+                            )
+                        ),
+                    "stock_loan_trading_rate":
+                        self._optional_float(
+                            stock_loan.get(
+                                "tradingRate"
+                            )
+                        ),
+
+                    "source":
+                        "TOSS",
+                    "raw_json":
+                        dict(raw),
+                }
+            )
+
+        lending_rows: list[dict] = []
+
+        for raw in lending_result["records"]:
+            try:
+                trade_date = date.fromisoformat(
+                    str(
+                        raw.get(
+                            "date"
+                        )
+                        or ""
+                    )
+                )
+            except ValueError:
+                continue
+
+            lending_rows.append(
+                {
+                    "stock_code":
+                        stock_code,
+                    "trade_date":
+                        trade_date,
+
+                    "execution_quantity":
+                        to_int(
+                            raw.get(
+                                "executionQuantity"
+                            )
+                        ),
+                    "repayment_quantity":
+                        to_int(
+                            raw.get(
+                                "repaymentQuantity"
+                            )
+                        ),
+                    "balance_quantity":
+                        to_int(
+                            raw.get(
+                                "balanceQuantity"
+                            )
+                        ),
+                    "balance_amount":
+                        to_int(
+                            raw.get(
+                                "balanceAmount"
+                            )
+                        ),
+
+                    "source":
+                        "TOSS",
+                    "raw_json":
+                        dict(raw),
+                }
+            )
+
+        result = {
+            "programTrades":
+                self.repository
+                .upsert_stock_program_trades(
+                    program_rows
+                ),
+
+            "shortSelling":
+                self.repository
+                .upsert_stock_short_selling(
+                    short_rows
+                ),
+
+            "creditTrades":
+                self.repository
+                .upsert_stock_credit_trades(
+                    credit_rows
+                ),
+
+            "securitiesLending":
+                self.repository
+                .upsert_stock_securities_lending(
+                    lending_rows
+                ),
+        }
+
+        print(
+            "[MARKET][TOSS-TRADING-TRENDS] "
+            f"{stock_code} "
+            f"{result}",
+            flush=True,
+        )
+
+        return result
+
+    async def sync_historical_stock_investor_flow(
+        self,
+        stock_code: str,
+        *,
+        start_date: date,
+        end_date: date,
+    ) -> int:
+        stock = (
+            self.stock_repository
+            .get_stock(
+                stock_code
+            )
+        )
+
+        if stock is None:
+            raise ValueError(
+                "등록되지 않은 종목입니다: "
+                f"{stock_code}"
+            )
+
+        raw_rows = (
+            await kis_client
+            .get_historical_investor_flows(
+                stock_code,
+                start_date=start_date,
+                end_date=end_date,
+            )
+        )
+
+        parsed_rows: list[
+            dict
+        ] = []
+
+        for raw in raw_rows:
+            trade_date = (
+                self._parse_yyyymmdd(
+                    raw.get(
+                        "stck_bsop_date"
+                    )
+                )
+            )
+
+            if trade_date is None:
+                continue
+
+            parsed_rows.append(
+                {
+                    "stock_code":
+                        stock_code,
+
+                    "trade_date":
+                        trade_date,
+
+                    "foreign_net_buy_amount":
+                        to_decimal_or_none(
+                            raw.get(
+                                "frgn_ntby_tr_pbmn"
+                            )
+                        ),
+
+                    "institution_net_buy_amount":
+                        to_decimal_or_none(
+                            raw.get(
+                                "orgn_ntby_tr_pbmn"
+                            )
+                        ),
+
+                    "individual_net_buy_amount":
+                        to_decimal_or_none(
+                            raw.get(
+                                "prsn_ntby_tr_pbmn"
+                            )
+                        ),
+
+                    "foreign_net_buy_volume":
+                        to_int(
+                            raw.get(
+                                "frgn_ntby_qty"
+                            )
+                        ),
+
+                    "institution_net_buy_volume":
+                        to_int(
+                            raw.get(
+                                "orgn_ntby_qty"
+                            )
+                        ),
+
+                    "individual_net_buy_volume":
+                        to_int(
+                            raw.get(
+                                "prsn_ntby_qty"
+                            )
+                        ),
+
                     "foreign_holding_ratio":
                         None,
 
@@ -700,24 +2585,82 @@ class MarketDataService:
         stock_code: str,
         *,
         market_override: str | None = None,
+        market_cap_override: float | None = None,
     ) -> int:
-        # 최신 PER/PBR/EPS/BPS와
-        # 현재가를 먼저 갱신
-        stock_service = (
-            StockService(
-                self.db
+        stock_service = StockService(
+            self.db
+        )
+
+        previous_valuation = (
+            self.repository
+            .get_latest_usable_valuation(
+                stock_code
             )
         )
 
-        await (
-            stock_service
-            .sync_current_price(
-                stock_code,
-                market_override=(
-                    market_override
-                ),
+        kis_refreshed = False
+        kis_error: str | None = None
+
+        try:
+            await (
+                stock_service
+                ._sync_current_price_from_kis(
+                    stock_code,
+                    market_override=(
+                        market_override
+                    ),
+                )
             )
-        )
+            kis_refreshed = True
+
+        except (
+            ConfigurationError,
+            ExternalApiError,
+            ValueError,
+        ) as e:
+            self.db.rollback()
+            kis_error = str(e)
+
+            print(
+                "[VALUATION][KIS-FAIL] "
+                f"{stock_code}: {e}",
+                flush=True,
+            )
+
+            stock = (
+                self.stock_repository
+                .get_stock(
+                    stock_code
+                )
+            )
+
+            if (
+                stock is None
+                or stock.current_price is None
+                or float(
+                    stock.current_price
+                ) <= 0.0
+            ):
+                try:
+                    await (
+                        stock_service
+                        ._sync_current_price_from_toss(
+                            stock_code
+                        )
+                    )
+                except (
+                    ConfigurationError,
+                    ExternalApiError,
+                    ValueError,
+                ) as toss_error:
+                    self.db.rollback()
+
+                    print(
+                        "[VALUATION][TOSS-FAIL] "
+                        f"{stock_code}: "
+                        f"{toss_error}",
+                        flush=True,
+                    )
 
         stock = (
             self.stock_repository
@@ -732,100 +2675,275 @@ class MarketDataService:
                 f"{stock_code}"
             )
 
+        price = self._optional_float(
+            stock.current_price
+        )
+        market_cap = self._optional_float(
+            stock.market_cap
+        )
+        eps = self._optional_float(
+            stock.eps
+        )
+        bps = self._optional_float(
+            stock.bps
+        )
+        per = self._optional_float(
+            stock.per
+        )
+        pbr = self._optional_float(
+            stock.pbr
+        )
+
+        if price is not None and price <= 0.0:
+            price = None
+
+        if (
+            market_cap is None
+            or market_cap <= 0.0
+        ):
+            market_cap = self._optional_float(
+                market_cap_override
+            )
+
+        if previous_valuation is not None:
+            if price is None:
+                price = self._optional_float(
+                    previous_valuation.price
+                )
+
+            if (
+                market_cap is None
+                or market_cap <= 0.0
+            ):
+                market_cap = self._optional_float(
+                    previous_valuation.market_cap
+                )
+
+            if eps is None:
+                eps = self._optional_float(
+                    previous_valuation.eps
+                )
+
+            if bps is None:
+                bps = self._optional_float(
+                    previous_valuation.bps
+                )
+
+        if per is not None and per <= 0.0:
+            per = None
+
+        if pbr is not None and pbr <= 0.0:
+            pbr = None
+
+        if (
+            per is None
+            and price is not None
+            and eps is not None
+            and eps > 0.0
+        ):
+            per = price / eps
+
+        if (
+            pbr is None
+            and price is not None
+            and bps is not None
+            and bps > 0.0
+        ):
+            pbr = price / bps
+
+        if previous_valuation is not None:
+            previous_price = (
+                self._optional_float(
+                    previous_valuation.price
+                )
+            )
+
+            if (
+                per is None
+                and price is not None
+                and previous_price is not None
+                and previous_price > 0.0
+                and previous_valuation.per
+                is not None
+                and float(
+                    previous_valuation.per
+                ) > 0.0
+            ):
+                per = (
+                    float(
+                        previous_valuation.per
+                    )
+                    * price
+                    / previous_price
+                )
+
+            if (
+                pbr is None
+                and price is not None
+                and previous_price is not None
+                and previous_price > 0.0
+                and previous_valuation.pbr
+                is not None
+                and float(
+                    previous_valuation.pbr
+                ) > 0.0
+            ):
+                pbr = (
+                    float(
+                        previous_valuation.pbr
+                    )
+                    * price
+                    / previous_price
+                )
+
+        if (
+            per is None
+            and previous_valuation
+            is not None
+            and previous_valuation.per
+            is not None
+            and float(
+                previous_valuation.per
+            ) > 0.0
+        ):
+            per = float(
+                previous_valuation.per
+            )
+
+        if (
+            pbr is None
+            and previous_valuation
+            is not None
+            and previous_valuation.pbr
+            is not None
+            and float(
+                previous_valuation.pbr
+            ) > 0.0
+        ):
+            pbr = float(
+                previous_valuation.pbr
+            )
+
+        if (
+            market_cap is not None
+            and market_cap > 0.0
+            and (
+                stock.market_cap is None
+                or float(
+                    stock.market_cap
+                ) <= 0.0
+            )
+        ):
+            stock.market_cap = market_cap
+
+        if (
+            market_override
+            and stock.market
+            != market_override
+        ):
+            stock.market = market_override
+
+        self.db.commit()
+
+        if (
+            per is None
+            and pbr is None
+        ):
+            print(
+                "[VALUATION][EMPTY] "
+                f"stock={stock_code} "
+                f"price={price} "
+                f"marketCap={market_cap} "
+                f"stockPER={stock.per} "
+                f"stockPBR={stock.pbr} "
+                f"stockEPS={stock.eps} "
+                f"stockBPS={stock.bps} "
+                f"previousDate={previous_valuation.snapshot_date if previous_valuation is not None else None} "
+                f"previousPER={previous_valuation.per if previous_valuation is not None else None} "
+                f"previousPBR={previous_valuation.pbr if previous_valuation is not None else None} "
+                f"kisError={kis_error}",
+                flush=True,
+            )
+
+            raise ExternalApiError(
+                "PER/PBR을 확보하지 못했습니다: "
+                f"{stock_code}"
+            )
+
+        source = (
+            "KIS"
+            if kis_refreshed
+            else "KIS_FALLBACK"
+        )
+
         row = {
-            "stock_code":
-                stock_code,
-            "snapshot_date":
-                date.today(),
-
-            "price":
-                (
-                    float(
-                        stock.current_price
-                    )
-                    if stock.current_price
+            "stock_code": stock_code,
+            "snapshot_date": date.today(),
+            "price": price,
+            "market_cap": market_cap,
+            "per": per,
+            "pbr": pbr,
+            "eps": eps,
+            "bps": bps,
+            "dividend_yield": (
+                self._optional_float(
+                    previous_valuation
+                    .dividend_yield
+                )
+                if previous_valuation
+                is not None
+                else None
+            ),
+            "sector_code": (
+                stock.sector_code
+                or (
+                    previous_valuation
+                    .sector_code
+                    if previous_valuation
                     is not None
                     else None
-                ),
-
-            "market_cap":
-                (
-                    float(
-                        stock.market_cap
-                    )
-                    if stock.market_cap
+                )
+            ),
+            "sector_name": (
+                stock.sector_name
+                or (
+                    previous_valuation
+                    .sector_name
+                    if previous_valuation
                     is not None
                     else None
-                ),
-
-            "per":
-                (
-                    float(stock.per)
-                    if stock.per
+                )
+            ),
+            "sector_per": None,
+            "sector_pbr": None,
+            "market_per": None,
+            "market_pbr": None,
+            "source": source,
+            "raw_json": {
+                "stock_code": stock.code,
+                "sector_name": stock.sector_name,
+                "kis_refreshed": kis_refreshed,
+                "kis_error": kis_error,
+                "used_previous_valuation": (
+                    previous_valuation
                     is not None
-                    else None
                 ),
-
-            "pbr":
-                (
-                    float(stock.pbr)
-                    if stock.pbr
-                    is not None
-                    else None
-                ),
-
-            "eps":
-                (
-                    float(stock.eps)
-                    if stock.eps
-                    is not None
-                    else None
-                ),
-
-            "bps":
-                (
-                    float(stock.bps)
-                    if stock.bps
-                    is not None
-                    else None
-                ),
-
-            # 향후 배당 데이터 수집 단계에서
-            # 별도로 채운다.
-            "dividend_yield":
-                None,
-
-            "sector_code":
-                stock.sector_code,
-
-            "sector_name":
-                stock.sector_name,
-
-            # 업종/시장 평균 valuation은
-            # Feature Engine 단계에서 계산
-            "sector_per":
-                None,
-
-            "sector_pbr":
-                None,
-
-            "market_per":
-                None,
-
-            "market_pbr":
-                None,
-
-            "source":
-                "KIS",
-
-            "raw_json":
-                {
-                    "stock_code":
-                        stock.code,
-                    "sector_name":
-                        stock.sector_name,
-                },
+            },
         }
+
+        print(
+            "[VALUATION][FINAL] "
+            f"stock={stock_code} "
+            f"source={source} "
+            f"price={price} "
+            f"marketCap={market_cap} "
+            f"PER={per} "
+            f"PBR={pbr} "
+            f"EPS={eps} "
+            f"BPS={bps} "
+            f"previousDate={previous_valuation.snapshot_date if previous_valuation is not None else None}",
+            flush=True,
+        )
 
         return (
             self.repository
@@ -1259,8 +3377,36 @@ class MarketDataService:
             )
 
     @staticmethod
+    def _parse_iso_date(
+        value,
+    ) -> date | None:
+        text = str(
+            value or ""
+        ).strip()
+
+        if not text:
+            return None
+
+        try:
+            return datetime.fromisoformat(
+                text.replace(
+                    "Z",
+                    "+00:00",
+                )
+            ).date()
+        except ValueError:
+            pass
+
+        try:
+            return date.fromisoformat(
+                text[:10]
+            )
+        except ValueError:
+            return None
+
+    @staticmethod
     def _parse_yyyymmdd(
-        value: object,
+        value,
     ) -> date | None:
         text = str(
             value or ""
@@ -1345,34 +3491,12 @@ class MarketDataService:
         *,
         limit: int = 100,
     ) -> list[str]:
-        latest_snapshot_date = (
-            self.repository
-            .get_latest_valuation_snapshot_date(
-                on_or_before=date.today(),
+        return (
+            self.stock_repository
+            .get_stock_codes_for_market_context(
+                limit=limit
             )
         )
-
-        if latest_snapshot_date is None:
-            return []
-
-        rows = (
-            self.repository
-            .get_valuation_rows_for_date(
-                snapshot_date=(
-                    latest_snapshot_date
-                ),
-            )
-        )
-
-        stock_codes = [
-            snapshot.stock_code
-            for snapshot, _market
-            in rows
-        ]
-
-        return stock_codes[
-            :limit
-        ]
     
     @staticmethod
     def _close_on_or_before(

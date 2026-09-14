@@ -1,6 +1,20 @@
 from __future__ import annotations
 
+from bisect import bisect_right
+from collections import defaultdict
+from datetime import timedelta
+
+import json
+import math
 import numpy as np
+
+from scipy.stats import rankdata, spearmanr
+from sqlalchemy import select
+from sqlalchemy.orm import Session
+
+from app.models.financial_metric import FinancialMetric
+from app.models.financial_statement import FinancialStatement
+from app.models.future import Disclosure
 from sklearn.metrics import (
     accuracy_score,
     balanced_accuracy_score,
@@ -8,9 +22,12 @@ from sklearn.metrics import (
     recall_score,
     roc_auc_score,
 )
-from scipy.stats import spearmanr
-from sqlalchemy.orm import Session
-
+from app.repositories.market_data_repository import (
+    MarketDataRepository,
+)
+from app.repositories.stock_repository import (
+    StockRepository,
+)
 from app.services.historical_dataset_service import (
     HistoricalDatasetService,
 )
@@ -59,6 +76,18 @@ class HistoricalMlOofService:
 
         self.calibration_service = (
             HistoricalMlCalibrationService(
+                db
+            )
+        )
+
+        self.market_repository = (
+            MarketDataRepository(
+                db
+            )
+        )
+
+        self.stock_repository = (
+            StockRepository(
                 db
             )
         )
@@ -252,6 +281,1713 @@ class HistoricalMlOofService:
         }
 
     @staticmethod
+    def _max_drawdown_pct(
+        returns: list[float],
+    ) -> float:
+        if not returns:
+            return 0.0
+
+        equity = np.concatenate([
+            np.asarray(
+                [1.0],
+                dtype=np.float64,
+            ),
+            np.cumprod(
+                1.0
+                + np.asarray(
+                    returns,
+                    dtype=np.float64,
+                )
+            ),
+        ])
+
+        peak = np.maximum.accumulate(
+            equity
+        )
+
+        drawdown = (
+            equity / peak
+        ) - 1.0
+
+        return float(
+            np.min(drawdown)
+            * 100.0
+        )
+
+    @staticmethod
+    def _annualized_return_pct(
+        returns: list[float],
+        *,
+        rebalance_step: int,
+    ) -> float:
+        if not returns:
+            return 0.0
+
+        final_equity = float(
+            np.prod(
+                1.0
+                + np.asarray(
+                    returns,
+                    dtype=np.float64,
+                )
+            )
+        )
+
+        if final_equity <= 0.0:
+            return -100.0
+
+        periods_per_year = (
+            252.0
+            / rebalance_step
+        )
+
+        annualized = (
+            final_equity
+            ** (
+                periods_per_year
+                / len(returns)
+            )
+        ) - 1.0
+
+        return float(
+            annualized
+            * 100.0
+        )
+
+    @staticmethod
+    def _annualized_sharpe(
+        returns: list[float],
+        *,
+        rebalance_step: int,
+    ) -> float | None:
+        if len(returns) < 2:
+            return None
+
+        values = np.asarray(
+            returns,
+            dtype=np.float64,
+        )
+
+        std = float(
+            np.std(
+                values,
+                ddof=1,
+            )
+        )
+
+        if std <= 0.0:
+            return None
+
+        return float(
+            np.mean(values)
+            / std
+            * math.sqrt(
+                252.0
+                / rebalance_step
+            )
+        )
+    
+    @staticmethod
+    def _percentile_array(
+        values: np.ndarray,
+    ) -> np.ndarray:
+        values = np.asarray(
+            values,
+            dtype=np.float64,
+        )
+
+        if len(values) <= 1:
+            return np.full(
+                len(values),
+                50.0,
+                dtype=np.float64,
+            )
+
+        ranks = rankdata(
+            values,
+            method="average",
+        )
+
+        return (
+            (ranks - 1.0)
+            / (len(values) - 1.0)
+            * 100.0
+        )
+
+    def _build_historical_flow_scores(
+        self,
+        *,
+        stock_codes: list[str],
+        feature_dates: list,
+    ) -> tuple[np.ndarray, dict]:
+        if (
+            len(stock_codes)
+            != len(feature_dates)
+        ):
+            raise ValueError(
+                "Flow 평가용 stock/date 행 수가 "
+                "일치하지 않습니다."
+            )
+
+        flow_5d = np.full(
+            len(stock_codes),
+            np.nan,
+            dtype=np.float64,
+        )
+
+        flow_20d = np.full(
+            len(stock_codes),
+            np.nan,
+            dtype=np.float64,
+        )
+
+        indexes_by_stock = {}
+
+        for index, stock_code in enumerate(
+            stock_codes
+        ):
+            indexes_by_stock.setdefault(
+                stock_code,
+                [],
+            ).append(
+                index
+            )
+
+        for stock_code, indexes in (
+            indexes_by_stock.items()
+        ):
+            stock_dates = [
+                feature_dates[index]
+                for index
+                in indexes
+            ]
+
+            load_start_date = (
+                min(stock_dates)
+                - timedelta(days=60)
+            )
+
+            load_end_date = max(
+                stock_dates
+            )
+
+            flow_rows = (
+                self.market_repository
+                .get_stock_investor_flows(
+                    stock_code=stock_code,
+                    start_date=load_start_date,
+                    end_date=load_end_date,
+                )
+            )
+
+            price_rows = (
+                self.stock_repository
+                .get_daily_prices(
+                    stock_code=stock_code,
+                    start_date=load_start_date,
+                )
+            )
+
+            volume_by_date = {
+                row.trade_date:
+                    float(
+                        row.volume
+                        or 0.0
+                    )
+                for row
+                in price_rows
+                if (
+                    row.trade_date
+                    <= load_end_date
+                )
+            }
+
+            flow_dates = []
+            net_values = []
+            volume_values = []
+
+            for row in flow_rows:
+                price_volume = (
+                    volume_by_date.get(
+                        row.trade_date
+                    )
+                )
+
+                if (
+                    price_volume is None
+                    or price_volume <= 0.0
+                ):
+                    continue
+
+                flow_dates.append(
+                    row.trade_date
+                )
+
+                net_values.append(
+                    float(
+                        row.foreign_net_buy_volume
+                        or 0.0
+                    )
+                    + float(
+                        row.institution_net_buy_volume
+                        or 0.0
+                    )
+                )
+
+                volume_values.append(
+                    price_volume
+                )
+
+            prefix_net = np.concatenate([
+                np.asarray(
+                    [0.0],
+                    dtype=np.float64,
+                ),
+                np.cumsum(
+                    np.asarray(
+                        net_values,
+                        dtype=np.float64,
+                    )
+                ),
+            ])
+
+            prefix_volume = np.concatenate([
+                np.asarray(
+                    [0.0],
+                    dtype=np.float64,
+                ),
+                np.cumsum(
+                    np.asarray(
+                        volume_values,
+                        dtype=np.float64,
+                    )
+                ),
+            ])
+
+            for index in indexes:
+                end = bisect_right(
+                    flow_dates,
+                    feature_dates[index],
+                )
+
+                for periods, target in (
+                    (5, flow_5d),
+                    (20, flow_20d),
+                ):
+                    if end < periods:
+                        continue
+
+                    start = (
+                        end
+                        - periods
+                    )
+
+                    denominator = float(
+                        prefix_volume[end]
+                        - prefix_volume[start]
+                    )
+
+                    if denominator <= 0.0:
+                        continue
+
+                    target[index] = (
+                        float(
+                            prefix_net[end]
+                            - prefix_net[start]
+                        )
+                        / denominator
+                    )
+
+        flow_scores = np.full(
+            len(stock_codes),
+            50.0,
+            dtype=np.float64,
+        )
+
+        indexes_by_date = {}
+
+        for index, feature_date in enumerate(
+            feature_dates
+        ):
+            indexes_by_date.setdefault(
+                feature_date,
+                [],
+            ).append(
+                index
+            )
+
+        for indexes in indexes_by_date.values():
+            index_array = np.asarray(
+                indexes,
+                dtype=np.int64,
+            )
+
+            score_5d = np.full(
+                len(index_array),
+                50.0,
+                dtype=np.float64,
+            )
+
+            score_20d = np.full(
+                len(index_array),
+                50.0,
+                dtype=np.float64,
+            )
+
+            daily_5d = flow_5d[
+                index_array
+            ]
+
+            daily_20d = flow_20d[
+                index_array
+            ]
+
+            mask_5d = np.isfinite(
+                daily_5d
+            )
+
+            mask_20d = np.isfinite(
+                daily_20d
+            )
+
+            if np.any(mask_5d):
+                score_5d[mask_5d] = (
+                    self._percentile_array(
+                        daily_5d[
+                            mask_5d
+                        ]
+                    )
+                )
+
+            if np.any(mask_20d):
+                score_20d[mask_20d] = (
+                    self._percentile_array(
+                        daily_20d[
+                            mask_20d
+                        ]
+                    )
+                )
+
+            flow_scores[index_array] = (
+                score_5d
+                * 0.40
+                + score_20d
+                * 0.60
+            )
+
+        return (
+            flow_scores,
+            {
+                "rows":
+                    len(stock_codes),
+
+                "flow_5d_rows":
+                    int(
+                        np.sum(
+                            np.isfinite(
+                                flow_5d
+                            )
+                        )
+                    ),
+
+                "flow_20d_rows":
+                    int(
+                        np.sum(
+                            np.isfinite(
+                                flow_20d
+                            )
+                        )
+                    ),
+            },
+        )
+
+    @classmethod
+    def _flow_weight_sweep(
+        cls,
+        *,
+        probabilities: np.ndarray,
+        flow_scores: np.ndarray,
+        future_returns: np.ndarray,
+        stock_codes: list[str],
+        feature_dates: list,
+        rebalance_step: int,
+    ) -> list[dict]:
+        ml_scores = np.zeros(
+            len(probabilities),
+            dtype=np.float64,
+        )
+
+        indexes_by_date = {}
+
+        for index, feature_date in enumerate(
+            feature_dates
+        ):
+            indexes_by_date.setdefault(
+                feature_date,
+                [],
+            ).append(
+                index
+            )
+
+        for indexes in indexes_by_date.values():
+            index_array = np.asarray(
+                indexes,
+                dtype=np.int64,
+            )
+
+            ml_scores[index_array] = (
+                cls._percentile_array(
+                    probabilities[
+                        index_array
+                    ]
+                )
+            )
+
+        results = []
+
+        for flow_weight in (
+            0.05,
+            0.10,
+            0.15,
+            0.20,
+            0.30,
+        ):
+            composite_scores = (
+                ml_scores
+                * (1.0 - flow_weight)
+                + flow_scores
+                * flow_weight
+            )
+
+            metrics = cls._ranking_metrics(
+                probabilities=composite_scores,
+                future_returns=future_returns,
+                stock_codes=stock_codes,
+                feature_dates=feature_dates,
+                rebalance_step=rebalance_step,
+            )
+
+            target = next(
+                scenario
+                for scenario
+                in metrics[
+                    "turnover_buffer_backtest"
+                ][
+                    "scenarios"
+                ]
+                if (
+                    scenario[
+                        "portfolio_size"
+                    ]
+                    == 10
+                    and scenario[
+                        "exit_rank"
+                    ]
+                    == 20
+                    and scenario[
+                        "transaction_cost_bps"
+                    ]
+                    == 20.0
+                )
+            )
+
+            results.append(
+                {
+                    "flow_weight":
+                        flow_weight,
+
+                    "ml_weight":
+                        1.0
+                        - flow_weight,
+
+                    "spearman_ic_mean":
+                        metrics[
+                            "spearman_ic_mean"
+                        ],
+
+                    "top10_excess_mean_pct":
+                        metrics[
+                            "top10_excess_mean_pct"
+                        ],
+
+                    "buffer_top10_exit20_cost20":
+                        target[
+                            "summary"
+                        ],
+                }
+            )
+
+        return results
+
+    def _build_historical_financial_scores(
+        self,
+        *,
+        stock_codes: list[str],
+        feature_dates: list,
+    ) -> tuple[np.ndarray, dict]:
+        if len(stock_codes) != len(feature_dates):
+            raise ValueError(
+                "Financial 평가용 stock/date 행 수가 "
+                "일치하지 않습니다."
+            )
+
+        unique_stock_codes = sorted(
+            set(stock_codes)
+        )
+
+        target_years = (
+            "2022",
+            "2023",
+            "2024",
+            "2025",
+        )
+
+        metrics = self.db.scalars(
+            select(FinancialMetric)
+            .where(
+                FinancialMetric.stock_code.in_(
+                    unique_stock_codes
+                ),
+                FinancialMetric.report_code
+                == "11011",
+                FinancialMetric.business_year.in_(
+                    target_years
+                ),
+            )
+        ).all()
+
+        statements = self.db.scalars(
+            select(FinancialStatement)
+            .where(
+                FinancialStatement.stock_code.in_(
+                    unique_stock_codes
+                ),
+                FinancialStatement.report_code
+                == "11011",
+                FinancialStatement.business_year.in_(
+                    target_years
+                ),
+            )
+        ).all()
+
+        receipts_by_key = defaultdict(
+            set
+        )
+
+        for row in statements:
+            if not row.raw_json:
+                continue
+
+            payload = json.loads(
+                row.raw_json
+            )
+
+            receipt_no = payload.get(
+                "rcept_no"
+            )
+
+            if not receipt_no:
+                continue
+
+            receipts_by_key[
+                (
+                    row.stock_code,
+                    row.business_year,
+                    row.fs_div,
+                )
+            ].add(
+                str(receipt_no)
+            )
+
+        receipt_nos = {
+            receipt_no
+            for values
+            in receipts_by_key.values()
+            for receipt_no
+            in values
+        }
+
+        disclosures = self.db.scalars(
+            select(Disclosure)
+            .where(
+                Disclosure.receipt_no.in_(
+                    receipt_nos
+                )
+            )
+        ).all()
+
+        disclosure_date_by_receipt = {
+            disclosure.receipt_no:
+                disclosure.receipt_date
+            for disclosure
+            in disclosures
+            if disclosure.receipt_date
+            is not None
+        }
+
+        versions_by_stock = defaultdict(
+            list
+        )
+
+        invalid_metric_versions = 0
+
+        for metric in metrics:
+            key = (
+                metric.stock_code,
+                metric.business_year,
+                metric.fs_div,
+            )
+
+            metric_receipts = (
+                receipts_by_key.get(
+                    key,
+                    set(),
+                )
+            )
+
+            if len(metric_receipts) != 1:
+                invalid_metric_versions += 1
+                continue
+
+            receipt_no = next(
+                iter(
+                    metric_receipts
+                )
+            )
+
+            available_date = (
+                disclosure_date_by_receipt.get(
+                    receipt_no
+                )
+            )
+
+            if available_date is None:
+                invalid_metric_versions += 1
+                continue
+
+            versions_by_stock[
+                metric.stock_code
+            ].append(
+                (
+                    int(
+                        metric.business_year
+                    ),
+                    available_date,
+                    float(
+                        metric.financial_score
+                    ),
+                )
+            )
+
+        for stock_code in versions_by_stock:
+            versions_by_stock[
+                stock_code
+            ].sort(
+                key=lambda row: (
+                    row[0],
+                    row[1],
+                )
+            )
+
+        financial_scores = np.full(
+            len(stock_codes),
+            50.0,
+            dtype=np.float64,
+        )
+
+        covered_rows = 0
+
+        selected_year_counts = defaultdict(
+            int
+        )
+
+        for index, (
+            stock_code,
+            feature_date,
+        ) in enumerate(
+            zip(
+                stock_codes,
+                feature_dates,
+            )
+        ):
+            available = [
+                version
+                for version
+                in versions_by_stock.get(
+                    stock_code,
+                    []
+                )
+                if (
+                    version[1]
+                    < feature_date
+                )
+            ]
+
+            if not available:
+                continue
+
+            selected = max(
+                available,
+                key=lambda row: (
+                    row[0],
+                    row[1],
+                ),
+            )
+
+            financial_scores[
+                index
+            ] = selected[2]
+
+            covered_rows += 1
+
+            selected_year_counts[
+                selected[0]
+            ] += 1
+
+        total_rows = len(
+            stock_codes
+        )
+
+        return (
+            financial_scores,
+            {
+                "rows":
+                    total_rows,
+
+                "covered_rows":
+                    covered_rows,
+
+                "neutral_rows":
+                    (
+                        total_rows
+                        - covered_rows
+                    ),
+
+                "coverage_pct":
+                    float(
+                        covered_rows
+                        / total_rows
+                        * 100.0
+                    )
+                    if total_rows
+                    else 0.0,
+
+                "invalid_metric_versions":
+                    invalid_metric_versions,
+
+                "selected_business_years": {
+                    str(year):
+                        count
+                    for year, count
+                    in sorted(
+                        selected_year_counts.items()
+                    )
+                },
+            },
+        )
+
+    @classmethod
+    def _financial_weight_sweep(
+        cls,
+        *,
+        probabilities: np.ndarray,
+        flow_scores: np.ndarray,
+        financial_scores: np.ndarray,
+        future_returns: np.ndarray,
+        stock_codes: list[str],
+        feature_dates: list,
+        rebalance_step: int,
+    ) -> list[dict]:
+        ml_scores = np.zeros(
+            len(probabilities),
+            dtype=np.float64,
+        )
+
+        indexes_by_date = {}
+
+        for index, feature_date in enumerate(
+            feature_dates
+        ):
+            indexes_by_date.setdefault(
+                feature_date,
+                [],
+            ).append(
+                index
+            )
+
+        for indexes in indexes_by_date.values():
+            index_array = np.asarray(
+                indexes,
+                dtype=np.int64,
+            )
+
+            ml_scores[
+                index_array
+            ] = (
+                cls._percentile_array(
+                    probabilities[
+                        index_array
+                    ]
+                )
+            )
+
+        flow_weight = 0.20
+
+        results = []
+
+        for financial_weight in (
+            0.10,
+            0.20,
+            0.30,
+            0.40,
+            0.45,
+        ):
+            ml_weight = (
+                1.0
+                - flow_weight
+                - financial_weight
+            )
+
+            composite_scores = (
+                ml_scores
+                * ml_weight
+                + flow_scores
+                * flow_weight
+                + financial_scores
+                * financial_weight
+            )
+
+            metrics = cls._ranking_metrics(
+                probabilities=composite_scores,
+                future_returns=future_returns,
+                stock_codes=stock_codes,
+                feature_dates=feature_dates,
+                rebalance_step=rebalance_step,
+            )
+
+            target = next(
+                scenario
+                for scenario
+                in metrics[
+                    "turnover_buffer_backtest"
+                ][
+                    "scenarios"
+                ]
+                if (
+                    scenario[
+                        "portfolio_size"
+                    ]
+                    == 10
+                    and scenario[
+                        "exit_rank"
+                    ]
+                    == 20
+                    and scenario[
+                        "transaction_cost_bps"
+                    ]
+                    == 20.0
+                )
+            )
+
+            results.append(
+                {
+                    "financial_weight":
+                        financial_weight,
+
+                    "flow_weight":
+                        flow_weight,
+
+                    "ml_weight":
+                        ml_weight,
+
+                    "spearman_ic_mean":
+                        metrics[
+                            "spearman_ic_mean"
+                        ],
+
+                    "top10_excess_mean_pct":
+                        metrics[
+                            "top10_excess_mean_pct"
+                        ],
+
+                    "buffer_top10_exit20_cost20":
+                        target[
+                            "summary"
+                        ],
+                }
+            )
+
+        return results
+
+    @classmethod
+    def _portfolio_backtest(
+        cls,
+        *,
+        daily_results: list[dict],
+        rebalance_step: int,
+    ) -> dict:
+        scenarios = []
+
+        for portfolio_size in (
+            10,
+            20,
+        ):
+            holdings_key = (
+                f"top{portfolio_size}_codes"
+            )
+
+            return_key = (
+                f"top{portfolio_size}_return"
+            )
+
+            for transaction_cost_bps in (
+                0.0,
+                10.0,
+                20.0,
+            ):
+                offsets = []
+
+                for offset in range(
+                    rebalance_step
+                ):
+                    cohort = daily_results[
+                        offset::rebalance_step
+                    ]
+
+                    if not cohort:
+                        continue
+
+                    previous_holdings = None
+
+                    net_returns = []
+                    benchmark_returns = []
+                    turnovers = []
+
+                    for row in cohort:
+                        holdings = set(
+                            row[
+                                holdings_key
+                            ]
+                        )
+
+                        if previous_holdings is None:
+                            turnover = 1.0
+
+                        else:
+                            overlap = len(
+                                previous_holdings
+                                & holdings
+                            )
+
+                            turnover = (
+                                1.0
+                                - (
+                                    overlap
+                                    / portfolio_size
+                                )
+                            )
+
+                        gross_return = float(
+                            row[
+                                return_key
+                            ]
+                        )
+
+                        transaction_cost = (
+                            turnover
+                            * transaction_cost_bps
+                            / 10000.0
+                        )
+
+                        net_return = (
+                            gross_return
+                            - transaction_cost
+                        )
+
+                        net_returns.append(
+                            net_return
+                        )
+
+                        benchmark_returns.append(
+                            float(
+                                row[
+                                    "universe_return"
+                                ]
+                            )
+                        )
+
+                        turnovers.append(
+                            turnover
+                        )
+
+                        previous_holdings = (
+                            holdings
+                        )
+
+                    net_excess = (
+                        np.asarray(
+                            net_returns,
+                            dtype=np.float64,
+                        )
+                        - np.asarray(
+                            benchmark_returns,
+                            dtype=np.float64,
+                        )
+                    )
+
+                    offsets.append(
+                        {
+                            "offset":
+                                offset,
+
+                            "periods":
+                                len(cohort),
+
+                            "first_date":
+                                cohort[
+                                    0
+                                ][
+                                    "date"
+                                ].isoformat(),
+
+                            "last_date":
+                                cohort[
+                                    -1
+                                ][
+                                    "date"
+                                ].isoformat(),
+
+                            "net_return_mean_pct":
+                                float(
+                                    np.mean(
+                                        net_returns
+                                    )
+                                    * 100.0
+                                ),
+
+                            "benchmark_return_mean_pct":
+                                float(
+                                    np.mean(
+                                        benchmark_returns
+                                    )
+                                    * 100.0
+                                ),
+
+                            "net_excess_mean_pct":
+                                float(
+                                    np.mean(
+                                        net_excess
+                                    )
+                                    * 100.0
+                                ),
+
+                            "net_excess_positive_rate_pct":
+                                float(
+                                    np.mean(
+                                        net_excess
+                                        > 0.0
+                                    )
+                                    * 100.0
+                                ),
+
+                            "annualized_return_pct":
+                                cls._annualized_return_pct(
+                                    net_returns,
+                                    rebalance_step=(
+                                        rebalance_step
+                                    ),
+                                ),
+
+                            "benchmark_annualized_return_pct":
+                                cls._annualized_return_pct(
+                                    benchmark_returns,
+                                    rebalance_step=(
+                                        rebalance_step
+                                    ),
+                                ),
+
+                            "annualized_sharpe":
+                                cls._annualized_sharpe(
+                                    net_returns,
+                                    rebalance_step=(
+                                        rebalance_step
+                                    ),
+                                ),
+
+                            "max_drawdown_pct":
+                                cls._max_drawdown_pct(
+                                    net_returns
+                                ),
+
+                            "benchmark_max_drawdown_pct":
+                                cls._max_drawdown_pct(
+                                    benchmark_returns
+                                ),
+
+                            "turnover_mean_pct":
+                                float(
+                                    np.mean(
+                                        turnovers
+                                    )
+                                    * 100.0
+                                ),
+                        }
+                    )
+
+                excess_values = [
+                    row[
+                        "net_excess_mean_pct"
+                    ]
+                    for row
+                    in offsets
+                ]
+
+                drawdown_values = [
+                    row[
+                        "max_drawdown_pct"
+                    ]
+                    for row
+                    in offsets
+                ]
+
+                scenarios.append(
+                    {
+                        "portfolio_size":
+                            portfolio_size,
+
+                        "transaction_cost_bps":
+                            transaction_cost_bps,
+
+                        "offsets":
+                            offsets,
+
+                        "summary": {
+                            "positive_excess_offsets":
+                                sum(
+                                    value > 0.0
+                                    for value
+                                    in excess_values
+                                ),
+
+                            "total_offsets":
+                                len(offsets),
+
+                            "net_excess_offset_mean_pct":
+                                float(
+                                    np.mean(
+                                        excess_values
+                                    )
+                                ),
+
+                            "net_excess_offset_min_pct":
+                                float(
+                                    np.min(
+                                        excess_values
+                                    )
+                                ),
+
+                            "net_excess_offset_max_pct":
+                                float(
+                                    np.max(
+                                        excess_values
+                                    )
+                                ),
+
+                            "annualized_return_offset_mean_pct":
+                                float(
+                                    np.mean(
+                                        [
+                                            row[
+                                                "annualized_return_pct"
+                                            ]
+                                            for row
+                                            in offsets
+                                        ]
+                                    )
+                                ),
+
+                            "max_drawdown_offset_worst_pct":
+                                float(
+                                    np.min(
+                                        drawdown_values
+                                    )
+                                ),
+
+                            "turnover_offset_mean_pct":
+                                float(
+                                    np.mean(
+                                        [
+                                            row[
+                                                "turnover_mean_pct"
+                                            ]
+                                            for row
+                                            in offsets
+                                        ]
+                                    )
+                                ),
+                        },
+                    }
+                )
+
+        return {
+            "rebalance_step":
+                rebalance_step,
+
+            "portfolio_weighting":
+                "equal_weight",
+
+            "benchmark":
+                (
+                    "same-date OOF universe "
+                    "equal-weight mean return"
+                ),
+
+            "turnover_definition":
+                (
+                    "1 - holdings overlap ratio; "
+                    "initial entry = 100%"
+                ),
+
+            "transaction_cost_rule":
+                (
+                    "net = gross - "
+                    "turnover * cost_bps / 10000"
+                ),
+
+            "scenarios":
+                scenarios,
+        }
+    
+    @classmethod
+    def _turnover_buffer_backtest(
+        cls,
+        *,
+        daily_results: list[dict],
+        rebalance_step: int,
+    ) -> dict:
+        scenarios = []
+
+        configurations = (
+            (10, 15),
+            (10, 20),
+            (20, 30),
+            (20, 40),
+        )
+
+        for (
+            portfolio_size,
+            exit_rank,
+        ) in configurations:
+            for transaction_cost_bps in (
+                10.0,
+                20.0,
+            ):
+                offsets = []
+
+                for offset in range(
+                    rebalance_step
+                ):
+                    cohort = daily_results[
+                        offset::rebalance_step
+                    ]
+
+                    if not cohort:
+                        continue
+
+                    previous_holdings = None
+
+                    net_returns = []
+                    benchmark_returns = []
+                    turnovers = []
+
+                    for row in cohort:
+                        ranked_codes = row[
+                            "ranked_codes"
+                        ]
+
+                        ranked_returns = row[
+                            "ranked_returns"
+                        ]
+
+                        rank_by_code = {
+                            code:
+                                index + 1
+                            for (
+                                index,
+                                code,
+                            )
+                            in enumerate(
+                                ranked_codes
+                            )
+                        }
+
+                        return_by_code = {
+                            code:
+                                float(
+                                    future_return
+                                )
+                            for (
+                                code,
+                                future_return,
+                            )
+                            in zip(
+                                ranked_codes,
+                                ranked_returns,
+                            )
+                        }
+
+                        if previous_holdings is None:
+                            holdings = list(
+                                ranked_codes[
+                                    :portfolio_size
+                                ]
+                            )
+
+                            turnover = 1.0
+
+                        else:
+                            survivors = [
+                                code
+                                for code
+                                in previous_holdings
+                                if (
+                                    rank_by_code.get(
+                                        code,
+                                        10**9,
+                                    )
+                                    <= exit_rank
+                                )
+                            ]
+
+                            survivors.sort(
+                                key=lambda code:
+                                    rank_by_code[
+                                        code
+                                    ]
+                            )
+
+                            holdings = list(
+                                survivors
+                            )
+
+                            for code in ranked_codes:
+                                if (
+                                    code
+                                    not in holdings
+                                ):
+                                    holdings.append(
+                                        code
+                                    )
+
+                                if (
+                                    len(
+                                        holdings
+                                    )
+                                    >= portfolio_size
+                                ):
+                                    break
+
+                            holdings = holdings[
+                                :portfolio_size
+                            ]
+
+                            overlap = len(
+                                set(
+                                    previous_holdings
+                                )
+                                & set(
+                                    holdings
+                                )
+                            )
+
+                            turnover = (
+                                1.0
+                                - (
+                                    overlap
+                                    / portfolio_size
+                                )
+                            )
+
+                        gross_return = float(
+                            np.mean(
+                                [
+                                    return_by_code[
+                                        code
+                                    ]
+                                    for code
+                                    in holdings
+                                ]
+                            )
+                        )
+
+                        transaction_cost = (
+                            turnover
+                            * transaction_cost_bps
+                            / 10000.0
+                        )
+
+                        net_return = (
+                            gross_return
+                            - transaction_cost
+                        )
+
+                        net_returns.append(
+                            net_return
+                        )
+
+                        benchmark_returns.append(
+                            float(
+                                row[
+                                    "universe_return"
+                                ]
+                            )
+                        )
+
+                        turnovers.append(
+                            turnover
+                        )
+
+                        previous_holdings = list(
+                            holdings
+                        )
+
+                    net_array = np.asarray(
+                        net_returns,
+                        dtype=np.float64,
+                    )
+
+                    benchmark_array = np.asarray(
+                        benchmark_returns,
+                        dtype=np.float64,
+                    )
+
+                    excess_array = (
+                        net_array
+                        - benchmark_array
+                    )
+
+                    cumulative_return = (
+                        float(
+                            np.prod(
+                                1.0
+                                + net_array
+                            )
+                        )
+                        - 1.0
+                    )
+
+                    benchmark_cumulative_return = (
+                        float(
+                            np.prod(
+                                1.0
+                                + benchmark_array
+                            )
+                        )
+                        - 1.0
+                    )
+
+                    offsets.append(
+                        {
+                            "offset":
+                                offset,
+
+                            "periods":
+                                len(
+                                    net_returns
+                                ),
+
+                            "net_excess_mean_pct":
+                                float(
+                                    np.mean(
+                                        excess_array
+                                    )
+                                    * 100.0
+                                ),
+
+                            "cumulative_return_pct":
+                                cumulative_return
+                                * 100.0,
+
+                            "benchmark_cumulative_return_pct":
+                                (
+                                    benchmark_cumulative_return
+                                    * 100.0
+                                ),
+
+                            "cumulative_excess_pct":
+                                (
+                                    cumulative_return
+                                    - benchmark_cumulative_return
+                                )
+                                * 100.0,
+
+                            "annualized_return_pct":
+                                cls._annualized_return_pct(
+                                    net_returns,
+                                    rebalance_step=(
+                                        rebalance_step
+                                    ),
+                                ),
+
+                            "annualized_sharpe":
+                                cls._annualized_sharpe(
+                                    net_returns,
+                                    rebalance_step=(
+                                        rebalance_step
+                                    ),
+                                ),
+
+                            "max_drawdown_pct":
+                                cls._max_drawdown_pct(
+                                    net_returns
+                                ),
+
+                            "turnover_mean_pct":
+                                float(
+                                    np.mean(
+                                        turnovers
+                                    )
+                                    * 100.0
+                                ),
+                        }
+                    )
+
+                excess_values = [
+                    row[
+                        "net_excess_mean_pct"
+                    ]
+                    for row
+                    in offsets
+                ]
+
+                cumulative_excess_values = [
+                    row[
+                        "cumulative_excess_pct"
+                    ]
+                    for row
+                    in offsets
+                ]
+
+                scenarios.append(
+                    {
+                        "portfolio_size":
+                            portfolio_size,
+
+                        "exit_rank":
+                            exit_rank,
+
+                        "transaction_cost_bps":
+                            transaction_cost_bps,
+
+                        "offsets":
+                            offsets,
+
+                        "summary": {
+                            "positive_excess_offsets":
+                                sum(
+                                    value > 0.0
+                                    for value
+                                    in excess_values
+                                ),
+
+                            "total_offsets":
+                                len(
+                                    offsets
+                                ),
+
+                            "net_excess_offset_mean_pct":
+                                float(
+                                    np.mean(
+                                        excess_values
+                                    )
+                                ),
+
+                            "net_excess_offset_min_pct":
+                                float(
+                                    np.min(
+                                        excess_values
+                                    )
+                                ),
+
+                            "net_excess_offset_max_pct":
+                                float(
+                                    np.max(
+                                        excess_values
+                                    )
+                                ),
+
+                            "cumulative_excess_offset_mean_pct":
+                                float(
+                                    np.mean(
+                                        cumulative_excess_values
+                                    )
+                                ),
+
+                            "annualized_return_offset_mean_pct":
+                                float(
+                                    np.mean(
+                                        [
+                                            row[
+                                                "annualized_return_pct"
+                                            ]
+                                            for row
+                                            in offsets
+                                        ]
+                                    )
+                                ),
+
+                            "max_drawdown_offset_worst_pct":
+                                float(
+                                    np.min(
+                                        [
+                                            row[
+                                                "max_drawdown_pct"
+                                            ]
+                                            for row
+                                            in offsets
+                                        ]
+                                    )
+                                ),
+
+                            "turnover_offset_mean_pct":
+                                float(
+                                    np.mean(
+                                        [
+                                            row[
+                                                "turnover_mean_pct"
+                                            ]
+                                            for row
+                                            in offsets
+                                        ]
+                                    )
+                                ),
+                        },
+                    }
+                )
+
+        return {
+            "strategy":
+                "rank_buffer",
+
+            "description":
+                (
+                    "신규 종목은 목표 TOP N에서 진입하고, "
+                    "기존 보유 종목은 exit_rank 밖으로 "
+                    "밀릴 때까지 유지"
+                ),
+
+            "transaction_cost_convention":
+                (
+                    "transaction_cost_bps는 "
+                    "교체 turnover에 적용하는 "
+                    "round-trip 비용으로 취급"
+                ),
+
+            "scenarios":
+                scenarios,
+        }
+
+    @staticmethod
     def _ranking_metrics(
         *,
         probabilities: np.ndarray,
@@ -303,6 +2039,12 @@ class HistoricalMlOofService:
                     indexes
                 ]
             )
+
+            daily_stock_codes = [
+                stock_codes[index]
+                for index
+                in indexes
+            ]
 
             order = np.argsort(
                 daily_probability
@@ -437,6 +2179,40 @@ class HistoricalMlOofService:
                             top10_return
                             - bottom10_return
                         ),
+
+                    "top10_codes": [
+                        daily_stock_codes[
+                            index
+                        ]
+                        for index
+                        in top10_indexes
+                    ],
+
+                    "top20_codes": [
+                        daily_stock_codes[
+                            index
+                        ]
+                        for index
+                        in top20_indexes
+                    ],
+
+                    "ranked_codes": [
+                        daily_stock_codes[
+                            index
+                        ]
+                        for index
+                        in order
+                    ],
+
+                    "ranked_returns": [
+                        float(
+                            daily_return[
+                                index
+                            ]
+                        )
+                        for index
+                        in order
+                    ],
                 }
             )
 
@@ -706,6 +2482,30 @@ class HistoricalMlOofService:
                 }
             )
 
+        portfolio_backtest = (
+            HistoricalMlOofService
+            ._portfolio_backtest(
+                daily_results=(
+                    daily_results
+                ),
+                rebalance_step=(
+                    rebalance_step
+                ),
+            )
+        )
+
+        turnover_buffer_backtest = (
+            HistoricalMlOofService
+            ._turnover_buffer_backtest(
+                daily_results=(
+                    daily_results
+                ),
+                rebalance_step=(
+                    rebalance_step
+                ),
+            )
+        )
+
         return {
             "ranking_dates":
                 len(
@@ -829,6 +2629,12 @@ class HistoricalMlOofService:
 
             "non_overlapping_rebalance_step":
                 rebalance_step,
+
+            "portfolio_backtest":
+                portfolio_backtest,
+
+            "turnover_buffer_backtest":
+                turnover_buffer_backtest,
 
             "non_overlapping_offsets":
                 non_overlapping_offsets,
@@ -1278,6 +3084,79 @@ class HistoricalMlOofService:
             )
         )
 
+        (
+            historical_flow_scores,
+            historical_flow_coverage,
+        ) = (
+            self._build_historical_flow_scores(
+                stock_codes=(
+                    all_stock_codes
+                ),
+                feature_dates=(
+                    all_feature_dates
+                ),
+            )
+        )
+
+        flow_weight_sweep = (
+            self._flow_weight_sweep(
+                probabilities=(
+                    oof_probability
+                ),
+                flow_scores=(
+                    historical_flow_scores
+                ),
+                future_returns=(
+                    oof_future_return
+                ),
+                stock_codes=(
+                    all_stock_codes
+                ),
+                feature_dates=(
+                    all_feature_dates
+                ),
+                rebalance_step=horizon,
+            )
+        )
+
+        (
+            historical_financial_scores,
+            historical_financial_coverage,
+        ) = (
+            self._build_historical_financial_scores(
+                stock_codes=(
+                    all_stock_codes
+                ),
+                feature_dates=(
+                    all_feature_dates
+                ),
+            )
+        )
+
+        financial_weight_sweep = (
+            self._financial_weight_sweep(
+                probabilities=(
+                    oof_probability
+                ),
+                flow_scores=(
+                    historical_flow_scores
+                ),
+                financial_scores=(
+                    historical_financial_scores
+                ),
+                future_returns=(
+                    oof_future_return
+                ),
+                stock_codes=(
+                    all_stock_codes
+                ),
+                feature_dates=(
+                    all_feature_dates
+                ),
+                rebalance_step=horizon,
+            )
+        )
+
         oof_metrics = (
             self.calibration_service
             ._metrics(
@@ -1460,6 +3339,18 @@ class HistoricalMlOofService:
 
             "oof_ranking_metrics":
                 ranking_metrics,
+
+            "historical_flow_coverage":
+                historical_flow_coverage,
+
+            "flow_weight_sweep":
+                flow_weight_sweep,
+
+            "historical_financial_coverage":
+                historical_financial_coverage,
+
+            "financial_weight_sweep":
+                financial_weight_sweep,
 
             "folds":
                 fold_results,

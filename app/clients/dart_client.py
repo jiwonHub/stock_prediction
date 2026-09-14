@@ -81,6 +81,50 @@ class DartClient:
 
         return result
 
+    async def fetch_company_info(
+        self,
+        *,
+        corp_code: str,
+    ) -> dict:
+        self._require_key()
+
+        async with httpx.AsyncClient(
+            timeout=20.0,
+            follow_redirects=True,
+        ) as client:
+            response = await client.get(
+                f"{self.BASE_URL}/company.json",
+                params={
+                    "crtfc_key": settings.dart_api_key,
+                    "corp_code": corp_code,
+                },
+            )
+
+        response.raise_for_status()
+
+        payload = response.json()
+
+        status = str(
+            payload.get(
+                "status",
+                "",
+            )
+        )
+
+        if status == "000":
+            return dict(
+                payload
+            )
+
+        if status == "013":
+            return {}
+
+        raise ExternalApiError(
+            "OpenDART 기업개황 조회 실패: "
+            f"{payload.get('message')} "
+            f"({status})"
+        )
+
     async def fetch_financial_statements(
         self,
         *,

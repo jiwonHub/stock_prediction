@@ -2,6 +2,8 @@ from datetime import date, datetime
 
 from sqlalchemy import (
     delete,
+    func,
+    or_,
     select,
     update,
 )
@@ -12,11 +14,15 @@ from app.models.stock import Stock
 from app.models.market_data import (
     MacroIndicator,
     MarketIndexPrice,
+    MarketInvestorFlow,
     SectorIndexPrice,
+    StockCreditTrade,
     StockInvestorFlow,
+    StockProgramTrade,
+    StockSecuritiesLending,
+    StockShortSelling,
     StockValuationSnapshot,
 )
-
 
 class MarketDataRepository:
     def __init__(self, db: Session):
@@ -49,6 +55,52 @@ class MarketDataRepository:
                 "source": stmt.excluded.source,
                 "raw_json": stmt.excluded.raw_json,
                 "updated_at": datetime.utcnow(),
+            },
+        )
+
+        self.db.execute(stmt)
+        self.db.commit()
+
+        return len(rows)
+
+    def upsert_market_investor_flows(
+        self,
+        rows: list[dict],
+    ) -> int:
+        if not rows:
+            return 0
+
+        stmt = insert(
+            MarketInvestorFlow
+        ).values(rows)
+
+        stmt = stmt.on_conflict_do_update(
+            constraint="uq_market_investor_flow",
+            set_={
+                "individual_buy_amount":
+                    stmt.excluded.individual_buy_amount,
+                "individual_sell_amount":
+                    stmt.excluded.individual_sell_amount,
+                "foreign_buy_amount":
+                    stmt.excluded.foreign_buy_amount,
+                "foreign_sell_amount":
+                    stmt.excluded.foreign_sell_amount,
+                "institution_buy_amount":
+                    stmt.excluded.institution_buy_amount,
+                "institution_sell_amount":
+                    stmt.excluded.institution_sell_amount,
+                "other_corporation_buy_amount":
+                    stmt.excluded.other_corporation_buy_amount,
+                "other_corporation_sell_amount":
+                    stmt.excluded.other_corporation_sell_amount,
+                "institution_breakdown_json":
+                    stmt.excluded.institution_breakdown_json,
+                "source":
+                    stmt.excluded.source,
+                "raw_json":
+                    stmt.excluded.raw_json,
+                "updated_at":
+                    datetime.utcnow(),
             },
         )
 
@@ -166,6 +218,159 @@ class MarketDataRepository:
         self.db.commit()
 
         return len(rows)
+    
+    def upsert_toss_stock_investor_flows(
+        self,
+        rows: list[dict],
+    ) -> int:
+        if not rows:
+            return 0
+
+        stmt = insert(
+            StockInvestorFlow
+        ).values(rows)
+
+        stmt = stmt.on_conflict_do_update(
+            constraint="uq_stock_investor_flow",
+            set_={
+                "foreign_net_buy_volume":
+                    stmt.excluded.foreign_net_buy_volume,
+                "institution_net_buy_volume":
+                    stmt.excluded.institution_net_buy_volume,
+                "individual_net_buy_volume":
+                    stmt.excluded.individual_net_buy_volume,
+
+                "foreign_holding_ratio":
+                    stmt.excluded.foreign_holding_ratio,
+
+                "source":
+                    stmt.excluded.source,
+                "raw_json":
+                    stmt.excluded.raw_json,
+
+                "updated_at":
+                    datetime.utcnow(),
+            },
+        )
+
+        self.db.execute(stmt)
+        self.db.commit()
+
+        return len(rows)
+    
+    def _upsert_trading_rows(
+        self,
+        *,
+        model,
+        constraint: str,
+        rows: list[dict],
+        fields: tuple[str, ...],
+    ) -> int:
+        if not rows:
+            return 0
+
+        stmt = insert(
+            model
+        ).values(rows)
+
+        update_values = {
+            field:
+                stmt.excluded[field]
+            for field in fields
+        }
+
+        update_values.update(
+            {
+                "source":
+                    stmt.excluded.source,
+                "raw_json":
+                    stmt.excluded.raw_json,
+                "updated_at":
+                    datetime.utcnow(),
+            }
+        )
+
+        stmt = stmt.on_conflict_do_update(
+            constraint=constraint,
+            set_=update_values,
+        )
+
+        self.db.execute(stmt)
+        self.db.commit()
+
+        return len(rows)
+
+    def upsert_stock_program_trades(
+        self,
+        rows: list[dict],
+    ) -> int:
+        return self._upsert_trading_rows(
+            model=StockProgramTrade,
+            constraint="uq_stock_program_trade",
+            rows=rows,
+            fields=(
+                "arbitrage_buy_volume",
+                "arbitrage_sell_volume",
+                "arbitrage_net_buy_volume",
+                "non_arbitrage_buy_volume",
+                "non_arbitrage_sell_volume",
+                "non_arbitrage_net_buy_volume",
+            ),
+        )
+
+    def upsert_stock_short_selling(
+        self,
+        rows: list[dict],
+    ) -> int:
+        return self._upsert_trading_rows(
+            model=StockShortSelling,
+            constraint="uq_stock_short_selling",
+            rows=rows,
+            fields=(
+                "short_selling_volume",
+                "short_selling_amount",
+                "short_selling_volume_rate",
+                "short_selling_amount_rate",
+            ),
+        )
+
+    def upsert_stock_credit_trades(
+        self,
+        rows: list[dict],
+    ) -> int:
+        return self._upsert_trading_rows(
+            model=StockCreditTrade,
+            constraint="uq_stock_credit_trade",
+            rows=rows,
+            fields=(
+                "margin_loan_new_quantity",
+                "margin_loan_return_quantity",
+                "margin_loan_balance_quantity",
+                "margin_loan_balance_rate",
+                "margin_loan_trading_rate",
+                "stock_loan_new_quantity",
+                "stock_loan_return_quantity",
+                "stock_loan_balance_quantity",
+                "stock_loan_balance_rate",
+                "stock_loan_trading_rate",
+            ),
+        )
+
+    def upsert_stock_securities_lending(
+        self,
+        rows: list[dict],
+    ) -> int:
+        return self._upsert_trading_rows(
+            model=StockSecuritiesLending,
+            constraint="uq_stock_securities_lending",
+            rows=rows,
+            fields=(
+                "execution_quantity",
+                "repayment_quantity",
+                "balance_quantity",
+                "balance_amount",
+            ),
+        )
 
     def upsert_stock_valuation_snapshots(
         self,
@@ -182,34 +387,73 @@ class MarketDataRepository:
             constraint="uq_stock_valuation_snapshot",
             set_={
                 "price":
-                    stmt.excluded.price,
+                    func.coalesce(
+                        stmt.excluded.price,
+                        StockValuationSnapshot.price,
+                    ),
                 "market_cap":
-                    stmt.excluded.market_cap,
+                    func.coalesce(
+                        stmt.excluded.market_cap,
+                        StockValuationSnapshot.market_cap,
+                    ),
 
                 "per":
-                    stmt.excluded.per,
+                    func.coalesce(
+                        stmt.excluded.per,
+                        StockValuationSnapshot.per,
+                    ),
                 "pbr":
-                    stmt.excluded.pbr,
+                    func.coalesce(
+                        stmt.excluded.pbr,
+                        StockValuationSnapshot.pbr,
+                    ),
                 "eps":
-                    stmt.excluded.eps,
+                    func.coalesce(
+                        stmt.excluded.eps,
+                        StockValuationSnapshot.eps,
+                    ),
                 "bps":
-                    stmt.excluded.bps,
+                    func.coalesce(
+                        stmt.excluded.bps,
+                        StockValuationSnapshot.bps,
+                    ),
                 "dividend_yield":
-                    stmt.excluded.dividend_yield,
+                    func.coalesce(
+                        stmt.excluded.dividend_yield,
+                        StockValuationSnapshot.dividend_yield,
+                    ),
 
                 "sector_code":
-                    stmt.excluded.sector_code,
+                    func.coalesce(
+                        stmt.excluded.sector_code,
+                        StockValuationSnapshot.sector_code,
+                    ),
                 "sector_name":
-                    stmt.excluded.sector_name,
+                    func.coalesce(
+                        stmt.excluded.sector_name,
+                        StockValuationSnapshot.sector_name,
+                    ),
                 "sector_per":
-                    stmt.excluded.sector_per,
+                    func.coalesce(
+                        stmt.excluded.sector_per,
+                        StockValuationSnapshot.sector_per,
+                    ),
                 "sector_pbr":
-                    stmt.excluded.sector_pbr,
+                    func.coalesce(
+                        stmt.excluded.sector_pbr,
+                        StockValuationSnapshot.sector_pbr,
+                    ),
 
                 "market_per":
-                    stmt.excluded.market_per,
+                    func.coalesce(
+                        stmt.excluded.market_per,
+                        StockValuationSnapshot.market_per,
+                    ),
                 "market_pbr":
-                    stmt.excluded.market_pbr,
+                    func.coalesce(
+                        stmt.excluded.market_pbr,
+                        StockValuationSnapshot.market_pbr,
+                    ),
 
                 "source":
                     stmt.excluded.source,
@@ -251,6 +495,41 @@ class MarketDataRepository:
 
         stmt = stmt.order_by(
             MarketIndexPrice.trade_date.asc()
+        )
+
+        return list(
+            self.db.scalars(
+                stmt
+            ).all()
+        )
+
+    def get_market_investor_flows(
+        self,
+        *,
+        market: str,
+        start_date: date,
+        end_date: date | None = None,
+    ) -> list[MarketInvestorFlow]:
+        stmt = (
+            select(
+                MarketInvestorFlow
+            )
+            .where(
+                MarketInvestorFlow.market
+                == market,
+                MarketInvestorFlow.trade_date
+                >= start_date,
+            )
+        )
+
+        if end_date is not None:
+            stmt = stmt.where(
+                MarketInvestorFlow.trade_date
+                <= end_date
+            )
+
+        stmt = stmt.order_by(
+            MarketInvestorFlow.trade_date.asc()
         )
 
         return list(
@@ -364,6 +643,119 @@ class MarketDataRepository:
                 stmt
             ).all()
         )
+    
+    def get_latest_stock_investor_flows(
+        self,
+        *,
+        stock_code: str,
+        limit: int = 60,
+    ) -> list[StockInvestorFlow]:
+        stmt = (
+            select(
+                StockInvestorFlow
+            )
+            .where(
+                StockInvestorFlow.stock_code
+                == stock_code
+            )
+            .order_by(
+                StockInvestorFlow.trade_date.desc()
+            )
+            .limit(
+                limit
+            )
+        )
+
+        rows = list(
+            self.db.scalars(
+                stmt
+            ).all()
+        )
+
+        rows.reverse()
+
+        return rows
+    
+    def _get_latest_trading_rows(
+        self,
+        *,
+        model,
+        stock_code: str,
+        limit: int,
+    ) -> list:
+        stmt = (
+            select(
+                model
+            )
+            .where(
+                model.stock_code
+                == stock_code
+            )
+            .order_by(
+                model.trade_date.desc()
+            )
+            .limit(
+                limit
+            )
+        )
+
+        rows = list(
+            self.db.scalars(
+                stmt
+            ).all()
+        )
+
+        rows.reverse()
+
+        return rows
+
+    def get_latest_stock_program_trades(
+        self,
+        *,
+        stock_code: str,
+        limit: int = 60,
+    ) -> list[StockProgramTrade]:
+        return self._get_latest_trading_rows(
+            model=StockProgramTrade,
+            stock_code=stock_code,
+            limit=limit,
+        )
+
+    def get_latest_stock_short_sellings(
+        self,
+        *,
+        stock_code: str,
+        limit: int = 60,
+    ) -> list[StockShortSelling]:
+        return self._get_latest_trading_rows(
+            model=StockShortSelling,
+            stock_code=stock_code,
+            limit=limit,
+        )
+
+    def get_latest_stock_credit_trades(
+        self,
+        *,
+        stock_code: str,
+        limit: int = 60,
+    ) -> list[StockCreditTrade]:
+        return self._get_latest_trading_rows(
+            model=StockCreditTrade,
+            stock_code=stock_code,
+            limit=limit,
+        )
+
+    def get_latest_stock_securities_lending(
+        self,
+        *,
+        stock_code: str,
+        limit: int = 60,
+    ) -> list[StockSecuritiesLending]:
+        return self._get_latest_trading_rows(
+            model=StockSecuritiesLending,
+            stock_code=stock_code,
+            limit=limit,
+        )
 
     def get_latest_valuation(
         self,
@@ -376,6 +768,40 @@ class MarketDataRepository:
             .where(
                 StockValuationSnapshot.stock_code
                 == stock_code
+            )
+            .order_by(
+                StockValuationSnapshot
+                .snapshot_date
+                .desc()
+            )
+            .limit(1)
+        )
+
+        return self.db.scalar(
+            stmt
+        )
+
+    def get_latest_usable_valuation(
+        self,
+        stock_code: str,
+    ) -> StockValuationSnapshot | None:
+        stmt = (
+            select(
+                StockValuationSnapshot
+            )
+            .where(
+                StockValuationSnapshot.stock_code
+                == stock_code,
+                or_(
+                    StockValuationSnapshot.per
+                    .is_not(None),
+                    StockValuationSnapshot.pbr
+                    .is_not(None),
+                    StockValuationSnapshot.eps
+                    .is_not(None),
+                    StockValuationSnapshot.bps
+                    .is_not(None),
+                ),
             )
             .order_by(
                 StockValuationSnapshot
@@ -433,10 +859,12 @@ class MarketDataRepository:
                 StockValuationSnapshot.snapshot_date
                 == snapshot_date,
                 Stock.is_active.is_(True),
-                Stock.current_price.is_not(None),
-                Stock.current_price > 0,
-                Stock.market_cap.is_not(None),
-                Stock.market_cap > 0,
+                StockValuationSnapshot.price
+                .is_not(None),
+                StockValuationSnapshot.price > 0,
+                StockValuationSnapshot.market_cap
+                .is_not(None),
+                StockValuationSnapshot.market_cap > 0,
                 Stock.market.in_(
                     [
                         "KOSPI",
@@ -445,7 +873,9 @@ class MarketDataRepository:
                 ),
             )
             .order_by(
-                Stock.market_cap.desc(),
+                StockValuationSnapshot
+                .market_cap
+                .desc(),
                 Stock.code.asc(),
             )
         )

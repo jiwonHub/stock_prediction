@@ -72,12 +72,12 @@ class FinancialStatement(Base):
     )
 
     account_id: Mapped[str] = mapped_column(
-        String(180),
+        String(500),
         default="",
     )
 
     account_nm: Mapped[str] = mapped_column(
-        String(180),
+        String(500),
         default="",
     )
 

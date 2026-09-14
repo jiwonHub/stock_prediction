@@ -326,7 +326,17 @@ class DisclosureAnalysis(Base):
 
 class RecommendationPerformance(Base):
     __tablename__ = "recommendation_performance"
-    __table_args__ = (UniqueConstraint("stock_code", "recommendation_date", "horizon_days", name="uq_recommendation_perf"),)
+
+    __table_args__ = (
+        UniqueConstraint(
+            "ranking_item_id",
+            "horizon_days",
+            name=(
+                "uq_recommendation_perf_"
+                "item_horizon"
+            ),
+        ),
+    )
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
     ranking_item_id: Mapped[int | None] = mapped_column(ForeignKey("ranking_items.id", ondelete="SET NULL"), nullable=True)
     stock_code: Mapped[str] = mapped_column(ForeignKey("stocks.code", ondelete="CASCADE"), index=True)

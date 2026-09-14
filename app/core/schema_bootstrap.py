@@ -37,6 +37,14 @@ _RUNTIME_ALTERS = [
     "ALTER TABLE stock_predictions ADD COLUMN IF NOT EXISTS confidence_score DOUBLE PRECISION",
     "ALTER TABLE stock_predictions ADD COLUMN IF NOT EXISTS feature_json JSONB",
     "ALTER TABLE stock_predictions ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP",
+
+    # recommendation_performance
+    (
+        "ALTER TABLE "
+        "recommendation_performance "
+        "DROP CONSTRAINT IF EXISTS "
+        "uq_recommendation_perf"
+    ),
 ]
 
 _RUNTIME_INDEXES = [
@@ -44,6 +52,22 @@ _RUNTIME_INDEXES = [
     "CREATE INDEX IF NOT EXISTS ix_stock_prices_code_date ON stock_prices(stock_code, trade_date DESC)",
     "CREATE INDEX IF NOT EXISTS ix_financial_metrics_financial_score ON financial_metrics(financial_score DESC)",
     "CREATE INDEX IF NOT EXISTS ix_stock_predictions_ml_score ON stock_predictions(ml_score DESC)",
+
+    (
+        "CREATE UNIQUE INDEX IF NOT EXISTS "
+        "uq_recommendation_perf_item_horizon "
+        "ON recommendation_performance"
+        "(ranking_item_id, horizon_days) "
+        "WHERE ranking_item_id IS NOT NULL"
+    ),
+
+    (
+        "CREATE INDEX IF NOT EXISTS "
+        "ix_recommendation_perf_pending "
+        "ON recommendation_performance"
+        "(horizon_days, recommendation_date) "
+        "WHERE evaluated_at IS NULL"
+    ),
 ]
 
 

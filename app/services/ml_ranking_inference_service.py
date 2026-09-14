@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import date, timedelta
 
 import numpy as np
+import xgboost as xgb
 from scipy.stats import rankdata
 from sqlalchemy.orm import Session
 
@@ -205,40 +206,47 @@ class MlRankingInferenceService:
         rows = (
             self.stock_repository
             .get_daily_prices(
-                stock_code=(
-                    stock_code
-                ),
+                stock_code=stock_code,
                 start_date=(
                     date.today()
                     - timedelta(
-                        days=(
-                            self
-                            .HISTORY_CALENDAR_DAYS
-                        )
+                        days=self.HISTORY_CALENDAR_DAYS
                     )
                 ),
             )
         )
 
-        rows = sorted(
-            rows,
-            key=lambda row:
-                row.trade_date,
+        return (
+            self._build_feature_vector_from_rows(
+                stock_code,
+                rows,
+            )
         )
 
-        if len(
-            rows
-        ) < 61:
+
+    def _build_feature_vector_from_rows(
+        self,
+        stock_code: str,
+        rows: list,
+    ) -> tuple[
+        np.ndarray,
+        date,
+        dict[str, float],
+    ]:
+        rows = sorted(
+            rows,
+            key=lambda row: row.trade_date,
+        )
+
+        if len(rows) < 61:
             raise ValueError(
                 "일봉 데이터가 부족합니다: "
                 f"{stock_code} "
                 f"{len(rows)}건"
             )
 
-        technical = (
-            build_latest_feature_dict(
-                rows
-            )
+        technical = build_latest_feature_dict(
+            rows
         )
 
         advanced = (
@@ -257,12 +265,10 @@ class MlRankingInferenceService:
             for feature_name
             in self.feature_names
             if (
-                feature_name
-                not in features
+                feature_name not in features
                 or features[
                     feature_name
-                ]
-                is None
+                ] is None
             )
         ]
 
@@ -302,9 +308,7 @@ class MlRankingInferenceService:
                 1,
                 -1,
             ),
-            rows[
-                -1
-            ].trade_date,
+            rows[-1].trade_date,
             {
                 feature_name:
                     float(
@@ -315,6 +319,61 @@ class MlRankingInferenceService:
                 for feature_name
                 in self.feature_names
             },
+        )
+
+    def _predict_feature_contributions(
+        self,
+        x: np.ndarray,
+    ) -> tuple[
+        dict[str, float],
+        float,
+    ]:
+        booster = (
+            self.classifier
+            .get_booster()
+        )
+
+        matrix = xgb.DMatrix(
+            x
+        )
+
+        values = booster.predict(
+            matrix,
+            pred_contribs=True,
+        )
+
+        if (
+            values.ndim != 2
+            or values.shape[0] != 1
+            or values.shape[1]
+            != len(self.feature_names) + 1
+        ):
+            raise RuntimeError(
+                "XGBoost Feature Contribution "
+                "형식이 예상과 다릅니다: "
+                f"shape={values.shape}"
+            )
+
+        row = values[0]
+
+        contributions = {
+            feature_name:
+                float(
+                    row[index]
+                )
+            for index, feature_name
+            in enumerate(
+                self.feature_names
+            )
+        }
+
+        bias = float(
+            row[-1]
+        )
+
+        return (
+            contributions,
+            bias,
         )
 
     def predict_stock(
@@ -347,6 +406,15 @@ class MlRankingInferenceService:
             ),
         )
 
+        (
+            feature_contributions,
+            contribution_bias,
+        ) = (
+            self._predict_feature_contributions(
+                x
+            )
+        )
+
         stock = (
             self.stock_repository
             .get_stock(
@@ -377,13 +445,27 @@ class MlRankingInferenceService:
 
             "features":
                 features,
+
+            "feature_contributions":
+                feature_contributions,
+
+            "contribution_bias":
+                contribution_bias,
         }
 
     def score_current_universe(
         self,
         *,
         limit: int = 100,
+        include_explanations: bool = True,
     ) -> dict:
+        from collections import defaultdict
+
+        from sqlalchemy import select
+
+        from app.models.stock import Stock
+        from app.models.stock_price import StockPrice
+
         stock_codes = (
             self.market_service
             .get_current_universe_stock_codes(
@@ -396,19 +478,109 @@ class MlRankingInferenceService:
                 "현재 TOP Universe가 없습니다."
             )
 
-        scored = []
+        start_date = (
+            date.today()
+            - timedelta(
+                days=self.HISTORY_CALENDAR_DAYS
+            )
+        )
+
+        # TOP100 일봉을 종목별 100번 조회하지 않고
+        # 한 번에 가져온다.
+        price_rows = (
+            self.db
+            .scalars(
+                select(
+                    StockPrice
+                )
+                .where(
+                    StockPrice.stock_code.in_(
+                        stock_codes
+                    ),
+                    StockPrice.trade_date
+                    >= start_date,
+                )
+                .order_by(
+                    StockPrice.stock_code.asc(),
+                    StockPrice.trade_date.asc(),
+                )
+            )
+            .all()
+        )
+
+        rows_by_stock = defaultdict(
+            list
+        )
+
+        for row in price_rows:
+            rows_by_stock[
+                row.stock_code
+            ].append(
+                row
+            )
+
+        # 종목명도 100번 get_stock 하지 않고
+        # 한 번에 가져온다.
+        stock_rows = (
+            self.db
+            .scalars(
+                select(
+                    Stock
+                )
+                .where(
+                    Stock.code.in_(
+                        stock_codes
+                    )
+                )
+            )
+            .all()
+        )
+
+        stock_name_map = {
+            stock.code: stock.name
+            for stock in stock_rows
+        }
+
+        prepared = []
         skipped = []
 
         for stock_code in stock_codes:
             try:
-                result = (
-                    self.predict_stock(
-                        stock_code
+                (
+                    x,
+                    feature_date,
+                    features,
+                ) = (
+                    self
+                    ._build_feature_vector_from_rows(
+                        stock_code,
+                        rows_by_stock.get(
+                            stock_code,
+                            [],
+                        ),
                     )
                 )
 
-                scored.append(
-                    result
+                prepared.append(
+                    {
+                        "stock_code":
+                            stock_code,
+
+                        "stock_name":
+                            stock_name_map.get(
+                                stock_code,
+                                stock_code,
+                            ),
+
+                        "x":
+                            x,
+
+                        "feature_date":
+                            feature_date,
+
+                        "features":
+                            features,
+                    }
                 )
 
             except Exception as e:
@@ -418,36 +590,110 @@ class MlRankingInferenceService:
                             stock_code,
 
                         "reason":
-                            str(
-                                e
-                            ),
+                            str(e),
                     }
                 )
 
-        if not scored:
+        if not prepared:
             raise ValueError(
                 "ML Ranking 추론에 성공한 "
                 "종목이 없습니다."
             )
 
-        probabilities = np.asarray(
+        # XGBoost도 종목별 100회가 아니라
+        # 전체 matrix 한 번에 추론한다.
+        x_matrix = np.vstack(
             [
-                row[
-                    "raw_probability"
-                ]
-                for row
-                in scored
-            ],
+                row["x"]
+                for row in prepared
+            ]
+        )
+
+        probabilities = np.asarray(
+            self.classifier
+            .predict_proba(
+                x_matrix
+            )[:, 1],
             dtype=np.float64,
         )
+
+        probabilities = np.clip(
+            probabilities,
+            0.0,
+            1.0,
+        )
+
+        scored = []
+
+        for (
+            prepared_row,
+            probability,
+        ) in zip(
+            prepared,
+            probabilities,
+        ):
+            if include_explanations:
+                (
+                    feature_contributions,
+                    contribution_bias,
+                ) = (
+                    self
+                    ._predict_feature_contributions(
+                        prepared_row[
+                            "x"
+                        ]
+                    )
+                )
+
+            else:
+                feature_contributions = {}
+                contribution_bias = 0.0
+
+            probability = float(
+                probability
+            )
+
+            scored.append(
+                {
+                    "stock_code":
+                        prepared_row[
+                            "stock_code"
+                        ],
+
+                    "stock_name":
+                        prepared_row[
+                            "stock_name"
+                        ],
+
+                    "feature_date":
+                        prepared_row[
+                            "feature_date"
+                        ],
+
+                    "raw_probability":
+                        probability,
+
+                    "raw_probability_pct":
+                        probability * 100.0,
+
+                    "features":
+                        prepared_row[
+                            "features"
+                        ],
+
+                    "feature_contributions":
+                        feature_contributions,
+
+                    "contribution_bias":
+                        contribution_bias,
+                }
+            )
 
         if len(
             probabilities
         ) == 1:
             percentiles = np.asarray(
-                [
-                    50.0
-                ],
+                [50.0],
                 dtype=np.float64,
             )
 
@@ -488,15 +734,14 @@ class MlRankingInferenceService:
             )
 
         scored.sort(
-            key=lambda row:
-                (
-                    row[
-                        "ml_score"
-                    ],
-                    row[
-                        "raw_probability"
-                    ],
-                ),
+            key=lambda row: (
+                row[
+                    "ml_score"
+                ],
+                row[
+                    "raw_probability"
+                ],
+            ),
             reverse=True,
         )
 
@@ -515,8 +760,7 @@ class MlRankingInferenceService:
             row[
                 "feature_date"
             ]
-            for row
-            in scored
+            for row in scored
         ]
 
         return {
@@ -603,3 +847,4 @@ class MlRankingInferenceService:
             "skipped":
                 skipped,
         }
+

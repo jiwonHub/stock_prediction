@@ -4,11 +4,12 @@ import hashlib
 import html
 import re
 from datetime import date, datetime, timedelta
+from zoneinfo import ZoneInfo
 from email.utils import parsedate_to_datetime
 from xml.etree import ElementTree
 
 import httpx
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.clients.kis_client import dart_client
@@ -20,11 +21,28 @@ from app.models.future import (
     RecommendationPerformance,
     StockNews,
 )
+from app.models.market_data import MarketIndexPrice
 from app.models.stock import Stock
 from app.models.stock_price import StockPrice
 
-
 class MarketContextService:
+    RANKING_VERSION = "phase13-long-term-investment-v3"
+    
+    PRIMARY_HORIZON_DAYS = 20
+
+    PERFORMANCE_HORIZONS = (
+        20,
+        60,
+        120,
+        240,
+    )
+
+    PERFORMANCE_RANK_LIMIT = 100
+
+    MIN_SNAPSHOT_RANKS = 20
+
+    KST = ZoneInfo("Asia/Seoul")
+
     def __init__(
         self,
         db: Session,
@@ -961,11 +979,39 @@ class MarketContextService:
     def record_rankings(
         self,
         rankings: list,
+        *,
+        as_of_date: date | None = None,
     ) -> None:
         if not rankings:
             return
 
-        today = date.today()
+        available_ranks = {
+            int(
+                ranking.rank
+            )
+            for ranking
+            in rankings
+        }
+
+        required_ranks = set(
+            range(
+                1,
+                self.MIN_SNAPSHOT_RANKS
+                + 1,
+            )
+        )
+
+        if not required_ranks.issubset(
+            available_ranks
+        ):
+            return
+
+        snapshot_date = (
+            as_of_date
+            or datetime.now(
+                self.KST
+            ).date()
+        )
 
         snapshot = self.db.scalar(
             select(
@@ -974,13 +1020,13 @@ class MarketContextService:
             .where(
                 RankingSnapshot
                 .ranking_version
-                == "phase4-v1",
+                == self.RANKING_VERSION,
                 RankingSnapshot
                 .as_of_date
-                == today,
+                == snapshot_date,
                 RankingSnapshot
                 .horizon_days
-                == 5,
+                == self.PRIMARY_HORIZON_DAYS,
                 RankingSnapshot
                 .universe
                 == "KRX",
@@ -989,18 +1035,54 @@ class MarketContextService:
         )
 
         if snapshot is not None:
+            print(
+                "[RANKING][SNAPSHOT-WRITE][SKIP] "
+                f"version={self.RANKING_VERSION} "
+                f"date={snapshot_date} "
+                f"snapshotId={snapshot.id}",
+                flush=True,
+            )
             return
+
+        print(
+            "[RANKING][SNAPSHOT-WRITE][START] "
+            f"version={self.RANKING_VERSION} "
+            f"date={snapshot_date} "
+            f"count={len(rankings)} "
+            f"quality={sum(1 for ranking in rankings if ranking.qualityScore is not None)} "
+            f"value={sum(1 for ranking in rankings if ranking.valueScore is not None)} "
+            f"samples={[{'stock': ranking.stockCode, 'quality': ranking.qualityScore, 'value': ranking.valueScore, 'total': ranking.totalScore} for ranking in rankings[:5]]}",
+            flush=True,
+        )
 
         snapshot = RankingSnapshot(
             ranking_version=(
-                "phase4-v1"
+                self.RANKING_VERSION
             ),
-            as_of_date=today,
-            horizon_days=5,
+            as_of_date=snapshot_date,
+            horizon_days=(
+                self.PRIMARY_HORIZON_DAYS
+            ),
             universe="KRX",
             weights_json={
-                "financial": 0.45,
-                "ml": 0.55,
+                "quality": 0.25,
+                "growth": 0.20,
+                "value": 0.20,
+                "financial_health": 0.15,
+                "relative_strength": 0.10,
+                "flow": 0.05,
+                "ml": 0.05,
+            },
+            metadata_json={
+                "ranker": (
+                    self.RANKING_VERSION
+                ),
+                "score_policy": (
+                    "multi_factor_investment_attractiveness"
+                ),
+                "performance_tracking": (
+                    "top10_20_60_trading_days"
+                ),
             },
         )
 
@@ -1008,104 +1090,376 @@ class MarketContextService:
         self.db.flush()
 
         for ranking in rankings:
-            ranking_item = (
-                RankingItem(
-                    snapshot_id=(
-                        snapshot.id
+            ranking_item = RankingItem(
+                snapshot_id=snapshot.id,
+                stock_code=(
+                    ranking.stockCode
+                ),
+                rank=ranking.rank,
+                total_score=(
+                    ranking.totalScore
+                ),
+                financial_score=(
+                    ranking.financialScore
+                ),
+                ml_score=(
+                    ranking.mlScore
+                ),
+                valuation_score=(
+                    ranking.valueScore
+                    or 0.0
+                ),
+                momentum_score=0.0,
+                predicted_return=None,
+                upside_probability=None,
+                score_components_json={
+                    "sector_name": (
+                        ranking.sectorName
                     ),
-                    stock_code=(
-                        ranking.stockCode
+                    "sector_rank": (
+                        ranking.sectorRank
                     ),
-                    rank=(
-                        ranking.rank
+                    "sector_peer_count": (
+                        ranking.sectorPeerCount
                     ),
-                    total_score=(
-                        ranking.totalScore
+
+                    "quality": (
+                        ranking.qualityScore
                     ),
-                    financial_score=(
-                        ranking
-                        .financialScore
+                    "growth": (
+                        ranking.growthScore
                     ),
-                    ml_score=max(
-                        0.0,
-                        min(
-                            100.0,
-                            ranking
-                            .upsideProbability,
-                        ),
+                    "value": (
+                        ranking.valueScore
                     ),
-                    predicted_return=(
-                        ranking
-                        .predictedReturn
+                    "financial_health": (
+                        ranking.financialHealthScore
                     ),
-                    upside_probability=(
-                        ranking
-                        .upsideProbability
+                    "relative_strength": (
+                        ranking.relativeStrengthScore
                     ),
-                )
+                    "flow": (
+                        ranking.flowScore
+                    ),
+                    "ml": (
+                        ranking.mlScore
+                    ),
+                    "data_coverage": (
+                        ranking.dataCoverage
+                    ),
+                    "financial_reference": (
+                        float(
+                            ranking.financialScore
+                        )
+                    ),
+                },
+                rationale=(
+                    "동종업종 대비 수익성·성장성·"
+                    "밸류에이션·재무안정성/현금흐름을 "
+                    "중심으로 상대성과·수급·단기 ML "
+                    "신호를 보조 반영한 장기 투자 순위"
+                ),
             )
 
             self.db.add(
                 ranking_item
             )
-
             self.db.flush()
 
-            self.db.add(
-                RecommendationPerformance(
-                    ranking_item_id=(
-                        ranking_item.id
-                    ),
-                    stock_code=(
-                        ranking.stockCode
-                    ),
-                    recommendation_date=(
-                        today
-                    ),
-                    horizon_days=5,
-                    entry_price=(
-                        ranking.currentPrice
-                        if ranking
-                        .currentPrice
-                        > 0.0
-                        else None
-                    ),
-                    predicted_return=(
-                        ranking
-                        .predictedReturn
-                    ),
-                    target_date=(
-                        today
-                        + timedelta(
-                            days=7
-                        )
-                    ),
+            if (
+                ranking.rank
+                > self.PERFORMANCE_RANK_LIMIT
+            ):
+                continue
+
+            for horizon_days in (
+                self.PERFORMANCE_HORIZONS
+            ):
+                performance = self.db.scalar(
+                    select(
+                        RecommendationPerformance
+                    )
+                    .where(
+                        RecommendationPerformance
+                        .ranking_item_id
+                        == ranking_item.id,
+
+                        RecommendationPerformance
+                        .horizon_days
+                        == horizon_days,
+                    )
+                    .limit(
+                        1
+                    )
                 )
-            )
+
+                if performance is None:
+                    performance = (
+                        RecommendationPerformance(
+                            ranking_item_id=(
+                                ranking_item.id
+                            ),
+
+                            stock_code=(
+                                ranking.stockCode
+                            ),
+
+                            recommendation_date=(
+                                snapshot_date
+                            ),
+
+                            horizon_days=(
+                                horizon_days
+                            ),
+                        )
+                    )
+
+                    self.db.add(
+                        performance
+                    )
+
+                performance.ranking_item_id = (
+                    ranking_item.id
+                )
+
+                performance.entry_price = (
+                    ranking.currentPrice
+                    if ranking.currentPrice
+                    > 0.0
+                    else None
+                )
+
+                performance.target_date = None
+                performance.exit_price = None
+
+                performance.predicted_return = None
+                performance.actual_return = None
+                performance.benchmark_return = None
+                performance.excess_return = None
+
+                performance.direction_correct = None
+                performance.evaluated_at = None
+
+                performance.metadata_json = {
+                    "ranking_version":
+                        self.RANKING_VERSION,
+
+                    "rank":
+                        int(
+                            ranking.rank
+                        ),
+
+                    "composite_score":
+                        float(
+                            ranking.totalScore
+                        ),
+
+                    "horizon_trading_days":
+                        horizon_days,
+
+                    "tracking":
+                        (
+                            "long_term_"
+                            "ranking_backtest"
+                        ),
+                }
 
         self.db.commit()
+
+    @staticmethod
+    def _benchmark_index_code(
+        market: str | None,
+    ) -> str | None:
+        normalized = (
+            market
+            or ""
+        ).upper()
+
+        if normalized == "KOSPI":
+            return "0001"
+
+        if normalized == "KOSDAQ":
+            return "1001"
+
+        return None
+
+    def _benchmark_return_for_period(
+        self,
+        *,
+        stock_code: str,
+        entry_date: date,
+        exit_date: date,
+    ) -> tuple[
+        float | None,
+        str | None,
+    ]:
+        stock = self.db.scalar(
+            select(
+                Stock
+            )
+            .where(
+                Stock.code
+                == stock_code
+            )
+            .limit(1)
+        )
+
+        if stock is None:
+            return (
+                None,
+                None,
+            )
+
+        index_code = (
+            self._benchmark_index_code(
+                stock.market
+            )
+        )
+
+        if index_code is None:
+            return (
+                None,
+                None,
+            )
+
+        entry_row = self.db.scalar(
+            select(
+                MarketIndexPrice
+            )
+            .where(
+                MarketIndexPrice.index_code
+                == index_code,
+                MarketIndexPrice.trade_date
+                <= entry_date,
+            )
+            .order_by(
+                MarketIndexPrice.trade_date.desc()
+            )
+            .limit(1)
+        )
+
+        if (
+            entry_row is None
+            or entry_row.close is None
+            or float(
+                entry_row.close
+            ) <= 0.0
+        ):
+            return (
+                None,
+                index_code,
+            )
+
+        exit_row = self.db.scalar(
+            select(
+                MarketIndexPrice
+            )
+            .where(
+                MarketIndexPrice.index_code
+                == index_code,
+                MarketIndexPrice.trade_date
+                > entry_row.trade_date,
+                MarketIndexPrice.trade_date
+                <= exit_date,
+            )
+            .order_by(
+                MarketIndexPrice.trade_date.desc()
+            )
+            .limit(1)
+        )
+
+        if (
+            exit_row is None
+            or exit_row.close is None
+        ):
+            return (
+                None,
+                index_code,
+            )
+
+        benchmark_return = (
+            float(
+                exit_row.close
+            )
+            / float(
+                entry_row.close
+            )
+            - 1.0
+        ) * 100.0
+
+        return (
+            benchmark_return,
+            index_code,
+        )
 
     def evaluate_performance(
         self,
     ) -> None:
-        pending = list(
-            self.db.scalars(
-                select(
-                    RecommendationPerformance
+        today = datetime.now(
+            self.KST
+        ).date()
+
+        pending = []
+
+        for horizon_days in (
+            self.PERFORMANCE_HORIZONS
+        ):
+            earliest_possible_date = (
+                today
+                - timedelta(
+                    days=horizon_days
                 )
-                .where(
-                    RecommendationPerformance
-                    .evaluated_at
-                    .is_(None)
-                )
-                .order_by(
-                    RecommendationPerformance
-                    .recommendation_date
-                    .asc()
-                )
-                .limit(500)
-            ).all()
-        )
+            )
+
+            horizon_pending = list(
+                self.db.scalars(
+                    select(
+                        RecommendationPerformance
+                    )
+                    .join(
+                        RankingItem,
+                        RankingItem.id
+                        == RecommendationPerformance
+                        .ranking_item_id,
+                    )
+                    .join(
+                        RankingSnapshot,
+                        RankingSnapshot.id
+                        == RankingItem.snapshot_id,
+                    )
+                    .where(
+                        RankingSnapshot
+                        .ranking_version
+                        == self.RANKING_VERSION,
+
+                        RecommendationPerformance
+                        .horizon_days
+                        == horizon_days,
+
+                        RecommendationPerformance
+                        .recommendation_date
+                        <= earliest_possible_date,
+
+                        RecommendationPerformance
+                        .evaluated_at
+                        .is_(None),
+                    )
+                    .order_by(
+                        RecommendationPerformance
+                        .recommendation_date
+                        .asc(),
+
+                        RankingItem.rank.asc(),
+                    )
+                    .limit(
+                        2000
+                    )
+                ).all()
+            )
+
+            pending.extend(
+                horizon_pending
+            )
 
         changed = False
 
@@ -1125,55 +1479,27 @@ class MarketContextService:
                         StockPrice.stock_code
                         == item.stock_code,
                         StockPrice.trade_date
-                        > item
-                        .recommendation_date,
+                        > item.recommendation_date,
                     )
                     .order_by(
-                        StockPrice
-                        .trade_date
-                        .asc()
+                        StockPrice.trade_date.asc()
                     )
                     .limit(
                         item.horizon_days
                     )
                 ).all()
             )
-
+            # 해당 horizon만큼의 실제 미래 거래일이
+            # 모두 존재할 때만 평가합니다.
             if (
                 len(prices)
-                >= item.horizon_days
+                < item.horizon_days
             ):
-                exit_price = float(
-                    prices[-1].close
-                )
-
-            elif (
-                item.target_date
-                is not None
-                and date.today()
-                >= item.target_date
-            ):
-                stock = self.db.get(
-                    Stock,
-                    item.stock_code,
-                )
-
-                if (
-                    stock is None
-                    or not stock
-                    .current_price
-                    or stock
-                    .current_price
-                    <= 0
-                ):
-                    continue
-
-                exit_price = float(
-                    stock.current_price
-                )
-
-            else:
                 continue
+
+            exit_price = float(
+                prices[-1].close
+            )
 
             actual_return = (
                 exit_price
@@ -1183,9 +1509,33 @@ class MarketContextService:
                 - 1.0
             ) * 100.0
 
-            predicted = float(
-                item.predicted_return
-                or 0.0
+            (
+                benchmark_return,
+                benchmark_index_code,
+            ) = (
+                self._benchmark_return_for_period(
+                    stock_code=(
+                        item.stock_code
+                    ),
+                    entry_date=(
+                        item.recommendation_date
+                    ),
+                    exit_date=(
+                        prices[-1].trade_date
+                    ),
+                )
+            )
+
+            excess_return = (
+                actual_return
+                - benchmark_return
+                if benchmark_return
+                is not None
+                else None
+            )
+
+            item.target_date = (
+                prices[-1].trade_date
             )
 
             item.exit_price = (
@@ -1196,25 +1546,51 @@ class MarketContextService:
                 actual_return
             )
 
-            item.excess_return = (
-                actual_return
+            item.predicted_return = None
+
+            item.benchmark_return = (
+                benchmark_return
             )
 
-            item.direction_correct = (
-                (
-                    predicted >= 0.0
-                    and actual_return
-                    >= 0.0
-                )
-                or (
-                    predicted < 0.0
-                    and actual_return
-                    < 0.0
-                )
+            item.excess_return = (
+                excess_return
             )
+
+            item.direction_correct = None
 
             item.evaluated_at = (
                 datetime.utcnow()
+            )
+
+            metadata = dict(
+                item.metadata_json
+                or {}
+            )
+
+            metadata.update(
+                {
+                    "exit_trade_date": (
+                        prices[-1]
+                        .trade_date
+                        .isoformat()
+                    ),
+                    "evaluated_trading_days": (
+                        item.horizon_days
+                    ),
+                    "benchmark_index_code": (
+                        benchmark_index_code
+                    ),
+                    "benchmark_return": (
+                        benchmark_return
+                    ),
+                    "excess_return": (
+                        excess_return
+                    ),
+                }
+            )
+
+            item.metadata_json = (
+                metadata
             )
 
             changed = True
@@ -1229,11 +1605,161 @@ class MarketContextService:
     ) -> dict:
         self.evaluate_performance()
 
+        base_filter = (
+            RankingSnapshot
+            .ranking_version
+            == self.RANKING_VERSION
+        )
+
+        total_count = int(
+            self.db.scalar(
+                select(
+                    func.count(
+                        RecommendationPerformance.id
+                    )
+                )
+                .join(
+                    RankingItem,
+                    RankingItem.id
+                    == RecommendationPerformance
+                    .ranking_item_id,
+                )
+                .join(
+                    RankingSnapshot,
+                    RankingSnapshot.id
+                    == RankingItem.snapshot_id,
+                )
+                .where(
+                    base_filter
+                )
+            )
+            or 0
+        )
+
+        evaluated_returns = [
+            float(
+                value
+            )
+            for value
+            in self.db.scalars(
+                select(
+                    RecommendationPerformance
+                    .actual_return
+                )
+                .join(
+                    RankingItem,
+                    RankingItem.id
+                    == RecommendationPerformance
+                    .ranking_item_id,
+                )
+                .join(
+                    RankingSnapshot,
+                    RankingSnapshot.id
+                    == RankingItem.snapshot_id,
+                )
+                .where(
+                    base_filter,
+                    RecommendationPerformance
+                    .actual_return
+                    .is_not(None),
+                )
+            ).all()
+            if value is not None
+        ]
+
+        evaluated_count = len(
+            evaluated_returns
+        )
+
+        pending_count = (
+            total_count
+            - evaluated_count
+        )
+
+        evaluated_excess_returns = [
+            float(
+                value
+            )
+            for value
+            in self.db.scalars(
+                select(
+                    RecommendationPerformance
+                    .excess_return
+                )
+                .join(
+                    RankingItem,
+                    RankingItem.id
+                    == RecommendationPerformance
+                    .ranking_item_id,
+                )
+                .join(
+                    RankingSnapshot,
+                    RankingSnapshot.id
+                    == RankingItem.snapshot_id,
+                )
+                .where(
+                    base_filter,
+                    RecommendationPerformance
+                    .excess_return
+                    .is_not(None),
+                )
+            ).all()
+            if value is not None
+        ]
+
+        average_return = 0.0
+        average_excess_return = 0.0
+        win_rate = 0.0
+        hit_rate = 0.0
+
+        if evaluated_returns:
+            average_return = (
+                sum(
+                    evaluated_returns
+                )
+                / evaluated_count
+            )
+
+            win_rate = (
+                sum(
+                    1
+                    for value
+                    in evaluated_returns
+                    if value > 0.0
+                )
+                / evaluated_count
+                * 100.0
+            )
+
+        if evaluated_excess_returns:
+            average_excess_return = (
+                sum(
+                    evaluated_excess_returns
+                )
+                / len(
+                    evaluated_excess_returns
+                )
+            )
+
+            hit_rate = (
+                sum(
+                    1
+                    for value
+                    in evaluated_excess_returns
+                    if value > 0.0
+                )
+                / len(
+                    evaluated_excess_returns
+                )
+                * 100.0
+            )
+
         stmt = (
             select(
                 RecommendationPerformance,
                 Stock.name,
                 RankingItem.total_score,
+                RankingItem.rank,
             )
             .join(
                 Stock,
@@ -1241,89 +1767,36 @@ class MarketContextService:
                 == RecommendationPerformance
                 .stock_code,
             )
-            .outerjoin(
+            .join(
                 RankingItem,
                 RankingItem.id
                 == RecommendationPerformance
                 .ranking_item_id,
             )
+            .join(
+                RankingSnapshot,
+                RankingSnapshot.id
+                == RankingItem.snapshot_id,
+            )
+            .where(
+                base_filter
+            )
             .order_by(
                 RecommendationPerformance
                 .recommendation_date
                 .desc(),
-                RecommendationPerformance
-                .id
-                .desc(),
+                RankingItem.rank.asc(),
             )
-            .limit(limit)
+            .limit(
+                limit
+            )
         )
 
-        rows = self.db.execute(
-            stmt
-        ).all()
-
-        evaluated = [
-            row[0]
-            for row in rows
-            if row[0].actual_return
-            is not None
-        ]
-
-        hit_rate = 0.0
-        average_return = 0.0
-        average_excess = 0.0
-        win_rate = 0.0
-
-        if evaluated:
-            hit_rate = (
-                sum(
-                    1
-                    for item
-                    in evaluated
-                    if item
-                    .direction_correct
-                )
-                / len(evaluated)
-                * 100.0
-            )
-
-            average_return = (
-                sum(
-                    float(
-                        item.actual_return
-                        or 0.0
-                    )
-                    for item
-                    in evaluated
-                )
-                / len(evaluated)
-            )
-
-            average_excess = (
-                sum(
-                    float(
-                        item.excess_return
-                        or 0.0
-                    )
-                    for item
-                    in evaluated
-                )
-                / len(evaluated)
-            )
-
-            win_rate = (
-                sum(
-                    1
-                    for item
-                    in evaluated
-                    if float(
-                        item.actual_return
-                        or 0.0
-                    ) > 0.0
-                )
-                / len(evaluated)
-                * 100.0
-            )
+        rows = (
+            self.db.execute(
+                stmt
+            ).all()
+        )
 
         records = []
 
@@ -1331,6 +1804,7 @@ class MarketContextService:
             performance,
             stock_name,
             total_score,
+            rank,
         ) in rows:
             records.append(
                 {
@@ -1338,30 +1812,34 @@ class MarketContextService:
                         performance
                         .stock_code
                     ),
+
                     "stockName": (
                         stock_name
                         or ""
                     ),
+
+                    "rank": int(
+                        rank
+                    ),
+
                     "recommendedAt": (
                         datetime.combine(
                             performance
                             .recommendation_date,
-                            datetime
-                            .min
-                            .time(),
+                            datetime.min.time(),
                         ).isoformat()
                     ),
+
                     "totalScore": float(
                         total_score
                         or 0.0
                     ),
-                    "predictedReturn": (
-                        float(
-                            performance
-                            .predicted_return
-                            or 0.0
-                        )
-                    ),
+
+                    # Flutter 구버전 호환 필드.
+                    # 실제 예측수익률로 사용하지 않습니다.
+                    "predictedReturn":
+                        0.0,
+
                     "actualReturn": (
                         float(
                             performance
@@ -1372,6 +1850,7 @@ class MarketContextService:
                         is not None
                         else None
                     ),
+
                     "excessReturn": (
                         float(
                             performance
@@ -1382,24 +1861,67 @@ class MarketContextService:
                         is not None
                         else None
                     ),
-                    "directionCorrect": (
+
+                    "directionCorrect":
+                        None,
+
+                    "status": (
+                        "evaluated"
+                        if performance
+                        .actual_return
+                        is not None
+                        else "pending"
+                    ),
+
+                    "horizonTradingDays": (
                         performance
-                        .direction_correct
+                        .horizon_days
                     ),
                 }
             )
 
         return {
-            "totalRecommendations": (
-                len(rows)
+            "rankingVersion": (
+                self.RANKING_VERSION
             ),
-            "hitRate": hit_rate,
+
+            "trackedTopRanks": (
+                self.PERFORMANCE_RANK_LIMIT
+            ),
+
+            "horizonTradingDays":
+                5,
+
+            # 아래 통계는 limit과 관계없이
+            # 전체 누적 추천 기준입니다.
+            "totalRecommendations":
+                total_count,
+
+            "evaluatedRecommendations":
+                evaluated_count,
+
+            "pendingRecommendations":
+                pending_count,
+
+            # 모델은 방향 분류기가 아니라
+            # 횡단면 랭커이므로 hitRate는
+            # 기준지수 초과 비율로 사용합니다.
+            "hitRate":
+                hit_rate,
+
             "averageReturn5d": (
                 average_return
             ),
+
             "averageExcessReturn5d": (
-                average_excess
+                average_excess_return
             ),
-            "winRate": win_rate,
-            "records": records,
+
+            "winRate": (
+                win_rate
+            ),
+
+            # records만 요청 limit만큼 반환합니다.
+            "records":
+                records,
         }

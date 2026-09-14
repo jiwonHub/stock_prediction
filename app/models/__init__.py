@@ -19,8 +19,13 @@ from app.models.future import (
 from app.models.market_data import (
     MacroIndicator,
     MarketIndexPrice,
+    MarketInvestorFlow,
     SectorIndexPrice,
+    StockCreditTrade,
     StockInvestorFlow,
+    StockProgramTrade,
+    StockSecuritiesLending,
+    StockShortSelling,
     StockValuationSnapshot,
 )
 from app.models.stock import Stock
@@ -48,8 +53,13 @@ __all__ = [
     "RecommendationPerformance",
     "AppSetting",
     "MarketIndexPrice",
+    "MarketInvestorFlow",
     "MacroIndicator",
     "SectorIndexPrice",
     "StockInvestorFlow",
+    "StockProgramTrade",
+    "StockShortSelling",
+    "StockCreditTrade",
+    "StockSecuritiesLending",
     "StockValuationSnapshot",
 ]
