@@ -19,7 +19,7 @@ from app.services.ml_ranking_inference_service import (
 
 
 class CompositeRankingService:
-    RANKING_VERSION = "phase13-long-term-investment-v3"
+    RANKING_VERSION = "phase13-long-term-investment-v4"
 
     WEIGHTS = {
         "quality": 0.25,
@@ -1131,6 +1131,12 @@ class CompositeRankingService:
                     ]
                 )
             )
+
+            if (
+                quality_score is None
+                or value_score is None
+            ):
+                continue
 
             flow_score = (
                 self._weighted_average(

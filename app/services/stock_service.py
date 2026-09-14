@@ -1590,19 +1590,34 @@ class StockService:
                 and len(snapshot_items)
                 >= limit
                 and all(
-                    required_component_keys
-                    .issubset(
-                        (
+                    (
+                        required_component_keys
+                        .issubset(
+                            (
+                                item
+                                .score_components_json
+                                or {}
+                            ).keys()
+                        )
+                        and (
                             item
                             .score_components_json
                             or {}
-                        ).keys()
+                        ).get(
+                            "quality"
+                        ) is not None
+                        and (
+                            item
+                            .score_components_json
+                            or {}
+                        ).get(
+                            "value"
+                        ) is not None
                     )
                     for item
                     in snapshot_items
                 )
             )
-
             snapshot_quality_count = sum(
                 1
                 for item in snapshot_items

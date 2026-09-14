@@ -26,7 +26,7 @@ from app.models.stock import Stock
 from app.models.stock_price import StockPrice
 
 class MarketContextService:
-    RANKING_VERSION = "phase13-long-term-investment-v3"
+    RANKING_VERSION = "phase13-long-term-investment-v4"
     
     PRIMARY_HORIZON_DAYS = 20
 
