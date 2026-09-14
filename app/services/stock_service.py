@@ -1921,6 +1921,15 @@ class StockService:
                         ]
                     )
 
+            print(
+                "[RANKING][SNAPSHOT-MISS] "
+                "일반 조회에서는 랭킹을 재계산하지 않습니다. "
+                "DailyPipeline Snapshot을 기다립니다.",
+                flush=True,
+            )
+
+            return []
+
         print(
             "[RANKING][RECOMPUTE] "
             f"force={force_recompute}",

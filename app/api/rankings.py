@@ -69,15 +69,4 @@ async def get_rankings(
         limit=limit,
     )
 
-    if rankings:
-        from app.services.market_context_service import (
-            MarketContextService,
-        )
-
-        MarketContextService(
-            db
-        ).record_rankings(
-            rankings
-        )
-
     return rankings
