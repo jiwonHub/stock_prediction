@@ -9,7 +9,7 @@ from email.utils import parsedate_to_datetime
 from xml.etree import ElementTree
 
 import httpx
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.orm import Session
 
 from app.clients.kis_client import dart_client
@@ -981,6 +981,7 @@ class MarketContextService:
         rankings: list,
         *,
         as_of_date: date | None = None,
+        replace_existing: bool = False,
     ) -> None:
         if not rankings:
             return
@@ -1035,14 +1036,82 @@ class MarketContextService:
         )
 
         if snapshot is not None:
+            if not replace_existing:
+                print(
+                    "[RANKING][SNAPSHOT-WRITE][SKIP] "
+                    f"version={self.RANKING_VERSION} "
+                    f"date={snapshot_date} "
+                    f"snapshotId={snapshot.id}",
+                    flush=True,
+                )
+                return
+
+            item_ids = list(
+                self.db.scalars(
+                    select(
+                        RankingItem.id
+                    ).where(
+                        RankingItem.snapshot_id
+                        == snapshot.id
+                    )
+                ).all()
+            )
+
+            if item_ids:
+                self.db.execute(
+                    delete(
+                        RecommendationPerformance
+                    ).where(
+                        RecommendationPerformance.ranking_item_id.in_(
+                            item_ids
+                        )
+                    )
+                )
+
+            self.db.execute(
+                delete(
+                    RankingItem
+                ).where(
+                    RankingItem.snapshot_id
+                    == snapshot.id
+                )
+            )
+
+            snapshot.weights_json = {
+                "quality": 0.25,
+                "growth": 0.20,
+                "value": 0.20,
+                "financial_health": 0.15,
+                "relative_strength": 0.10,
+                "flow": 0.05,
+                "ml": 0.05,
+            }
+
+            snapshot.metadata_json = {
+                "ranker": (
+                    self.RANKING_VERSION
+                ),
+                "score_policy": (
+                    "multi_factor_investment_attractiveness"
+                ),
+                "performance_tracking": (
+                    "top10_20_60_trading_days"
+                ),
+            }
+
+            snapshot.created_at = (
+                datetime.utcnow()
+            )
+
+            self.db.flush()
+
             print(
-                "[RANKING][SNAPSHOT-WRITE][SKIP] "
+                "[RANKING][SNAPSHOT-WRITE][REPLACE] "
                 f"version={self.RANKING_VERSION} "
                 f"date={snapshot_date} "
                 f"snapshotId={snapshot.id}",
                 flush=True,
             )
-            return
 
         print(
             "[RANKING][SNAPSHOT-WRITE][START] "
@@ -1055,39 +1124,40 @@ class MarketContextService:
             flush=True,
         )
 
-        snapshot = RankingSnapshot(
-            ranking_version=(
-                self.RANKING_VERSION
-            ),
-            as_of_date=snapshot_date,
-            horizon_days=(
-                self.PRIMARY_HORIZON_DAYS
-            ),
-            universe="KRX",
-            weights_json={
-                "quality": 0.25,
-                "growth": 0.20,
-                "value": 0.20,
-                "financial_health": 0.15,
-                "relative_strength": 0.10,
-                "flow": 0.05,
-                "ml": 0.05,
-            },
-            metadata_json={
-                "ranker": (
+        if snapshot is None:
+            snapshot = RankingSnapshot(
+                ranking_version=(
                     self.RANKING_VERSION
                 ),
-                "score_policy": (
-                    "multi_factor_investment_attractiveness"
+                as_of_date=snapshot_date,
+                horizon_days=(
+                    self.PRIMARY_HORIZON_DAYS
                 ),
-                "performance_tracking": (
-                    "top10_20_60_trading_days"
-                ),
-            },
-        )
+                universe="KRX",
+                weights_json={
+                    "quality": 0.25,
+                    "growth": 0.20,
+                    "value": 0.20,
+                    "financial_health": 0.15,
+                    "relative_strength": 0.10,
+                    "flow": 0.05,
+                    "ml": 0.05,
+                },
+                metadata_json={
+                    "ranker": (
+                        self.RANKING_VERSION
+                    ),
+                    "score_policy": (
+                        "multi_factor_investment_attractiveness"
+                    ),
+                    "performance_tracking": (
+                        "top10_20_60_trading_days"
+                    ),
+                },
+            )
 
-        self.db.add(snapshot)
-        self.db.flush()
+            self.db.add(snapshot)
+            self.db.flush()
 
         for ranking in rankings:
             ranking_item = RankingItem(

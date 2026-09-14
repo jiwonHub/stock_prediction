@@ -1,9 +1,13 @@
 from __future__ import annotations
 
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.models.future import (
+    StockAnalysisSnapshot,
+)
 from app.repositories.market_data_repository import (
     MarketDataRepository,
 )
@@ -62,6 +66,105 @@ class StockAnalysisService:
                 db
             )
         )
+
+    def get_latest_snapshot(
+        self,
+        *,
+        stock_code: str,
+    ) -> dict:
+        snapshot = self.db.scalar(
+            select(
+                StockAnalysisSnapshot
+            )
+            .where(
+                StockAnalysisSnapshot.stock_code
+                == stock_code,
+                StockAnalysisSnapshot.ranking_version
+                == MarketContextService.RANKING_VERSION,
+            )
+            .order_by(
+                StockAnalysisSnapshot.snapshot_date.desc(),
+                StockAnalysisSnapshot.updated_at.desc(),
+            )
+            .limit(1)
+        )
+
+        if snapshot is None:
+            raise ValueError(
+                "일일 분석 스냅샷이 없습니다: "
+                f"{stock_code}"
+            )
+
+        return dict(
+            snapshot.payload_json
+        )
+
+    def save_daily_snapshot(
+        self,
+        *,
+        stock_code: str,
+        snapshot_date: date,
+    ) -> dict:
+        from app.schemas.stock import (
+            StockAnalysisResponse,
+        )
+
+        payload = self.get_current_analysis(
+            stock_code=stock_code,
+        )
+
+        serialized = (
+            StockAnalysisResponse
+            .model_validate(
+                payload
+            )
+            .model_dump(
+                mode="json"
+            )
+        )
+
+        snapshot = self.db.scalar(
+            select(
+                StockAnalysisSnapshot
+            )
+            .where(
+                StockAnalysisSnapshot.stock_code
+                == stock_code,
+                StockAnalysisSnapshot.snapshot_date
+                == snapshot_date,
+                StockAnalysisSnapshot.ranking_version
+                == MarketContextService.RANKING_VERSION,
+            )
+            .limit(1)
+        )
+
+        now = datetime.utcnow()
+
+        if snapshot is None:
+            snapshot = StockAnalysisSnapshot(
+                stock_code=stock_code,
+                snapshot_date=snapshot_date,
+                ranking_version=(
+                    MarketContextService
+                    .RANKING_VERSION
+                ),
+                payload_json=serialized,
+                created_at=now,
+                updated_at=now,
+            )
+
+            self.db.add(
+                snapshot
+            )
+        else:
+            snapshot.payload_json = (
+                serialized
+            )
+            snapshot.updated_at = now
+
+        self.db.commit()
+
+        return serialized
 
     @staticmethod
     def _calculate_return(

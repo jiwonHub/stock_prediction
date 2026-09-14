@@ -23,6 +23,9 @@ from app.services.market_context_service import (
 from app.services.market_data_service import (
     MarketDataService,
 )
+from app.services.stock_analysis_service import (
+    StockAnalysisService,
+)
 from app.services.stock_service import (
     StockService,
 )
@@ -39,7 +42,7 @@ class DailyPipelineService:
     # 동일 후보군까지 갱신합니다.
     UNIVERSE_LIMIT = 500
 
-    TOP_NEWS_LIMIT = 10
+    TOP_CONTEXT_LIMIT = 100
 
     RECENT_PRICE_DAYS = 14
     BOOTSTRAP_PRICE_DAYS = 1200
@@ -105,6 +108,49 @@ class DailyPipelineService:
         )
 
         return snapshot_id is not None
+
+    def _daily_refresh_completed(
+        self,
+        snapshot_date: date,
+    ) -> bool:
+        recent_runs = self.db.scalars(
+            select(
+                DataSyncRun
+            )
+            .where(
+                DataSyncRun.source
+                == "automation",
+                DataSyncRun.sync_type
+                == "daily_pipeline",
+                DataSyncRun.status
+                == "completed",
+            )
+            .order_by(
+                DataSyncRun.started_at.desc()
+            )
+            .limit(20)
+        ).all()
+
+        target_date = (
+            snapshot_date.isoformat()
+        )
+
+        return any(
+            (
+                metadata.get(
+                    "date"
+                )
+                == target_date
+                and metadata.get(
+                    "refreshCompleted"
+                ) is True
+            )
+            for run in recent_runs
+            for metadata in [
+                run.metadata_json
+                or {}
+            ]
+        )
 
     def _create_run(
         self,
@@ -690,7 +736,7 @@ class DailyPipelineService:
                     return result
 
                 if (
-                    self._snapshot_exists(
+                    self._daily_refresh_completed(
                         today
                     )
                     and not force
@@ -979,9 +1025,11 @@ class DailyPipelineService:
 
                 top_news_rows = 0
                 top_news_failures = 0
+                top_disclosure_rows = 0
+                top_disclosure_failures = 0
 
                 for row in rankings[
-                    :self.TOP_NEWS_LIMIT
+                    :self.TOP_CONTEXT_LIMIT
                 ]:
                     try:
                         top_news_rows += await (
@@ -1007,12 +1055,70 @@ class DailyPipelineService:
                             flush=True,
                         )
 
+                    try:
+                        top_disclosure_rows += await (
+                            self.market_context_service
+                            .sync_disclosures(
+                                stock_code=(
+                                    row.stockCode
+                                ),
+                                limit=20,
+                            )
+                        )
+
+                    except Exception as e:
+                        self.db.rollback()
+
+                        top_disclosure_failures += 1
+
+                        print(
+                            "[DAILY] "
+                            "stock disclosures "
+                            f"{row.stockCode} "
+                            f"failed: {e}",
+                            flush=True,
+                        )
+
                 self.market_context_service.record_rankings(
                     rankings,
                     as_of_date=(
                         market_date
                     ),
+                    replace_existing=True,
                 )
+
+                analysis_snapshot_success = 0
+                analysis_snapshot_failures = 0
+
+                analysis_service = StockAnalysisService(
+                    self.db
+                )
+
+                for row in rankings:
+                    try:
+                        analysis_service.save_daily_snapshot(
+                            stock_code=(
+                                row.stockCode
+                            ),
+                            snapshot_date=(
+                                market_date
+                            ),
+                        )
+
+                        analysis_snapshot_success += 1
+
+                    except Exception as e:
+                        self.db.rollback()
+
+                        analysis_snapshot_failures += 1
+
+                        print(
+                            "[DAILY] "
+                            "analysis snapshot "
+                            f"{row.stockCode} "
+                            f"failed: {e}",
+                            flush=True,
+                        )
 
                 self.market_context_service.evaluate_performance()
 
@@ -1031,6 +1137,7 @@ class DailyPipelineService:
 
                 result = {
                     "status": "completed",
+                    "refreshCompleted": True,
                     "date": (
                         today.isoformat()
                     ),

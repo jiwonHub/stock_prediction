@@ -195,7 +195,7 @@ def get_stock_analysis(
     try:
         return StockAnalysisService(
             db
-        ).get_current_analysis(
+        ).get_latest_snapshot(
             stock_code=stock_code,
         )
 

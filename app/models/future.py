@@ -192,6 +192,51 @@ class Disclosure(Base):
     
 
 
+class StockAnalysisSnapshot(Base):
+    __tablename__ = "stock_analysis_snapshots"
+    __table_args__ = (
+        UniqueConstraint(
+            "stock_code",
+            "snapshot_date",
+            "ranking_version",
+            name="uq_stock_analysis_snapshot",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(
+        BigInteger,
+        primary_key=True,
+        autoincrement=True,
+    )
+    stock_code: Mapped[str] = mapped_column(
+        ForeignKey(
+            "stocks.code",
+            ondelete="CASCADE",
+        ),
+        index=True,
+    )
+    snapshot_date: Mapped[date] = mapped_column(
+        Date,
+        index=True,
+    )
+    ranking_version: Mapped[str] = mapped_column(
+        String(80),
+        index=True,
+    )
+    payload_json: Mapped[dict] = mapped_column(
+        JSONB,
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime,
+        default=datetime.utcnow,
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime,
+        default=datetime.utcnow,
+        onupdate=datetime.utcnow,
+    )
+
+
 class RankingSnapshot(Base):
     __tablename__ = "ranking_snapshots"
     __table_args__ = (UniqueConstraint("ranking_version", "as_of_date", "horizon_days", "universe", name="uq_ranking_snapshot"),)
