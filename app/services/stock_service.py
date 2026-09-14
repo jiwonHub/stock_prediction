@@ -1588,7 +1588,7 @@ class StockService:
             snapshot_has_required_components = (
                 snapshot is not None
                 and len(snapshot_items)
-                >= limit
+                >= MarketContextService.MIN_SNAPSHOT_RANKS
                 and all(
                     (
                         required_component_keys
@@ -1904,7 +1904,7 @@ class StockService:
 
                 if len(
                     cached_result
-                ) >= limit:
+                ) >= MarketContextService.MIN_SNAPSHOT_RANKS:
                     print(
                         "[RANKING][API][SNAPSHOT] "
                         f"date={snapshot.as_of_date} "
