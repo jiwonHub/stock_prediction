@@ -1,8 +1,8 @@
+import asyncio
 import secrets
 
 from fastapi import (
     APIRouter,
-    BackgroundTasks,
     Depends,
     Header,
     HTTPException,
@@ -21,11 +21,13 @@ from app.services.daily_pipeline_service import (
     DailyPipelineService,
 )
 
-
 router = APIRouter(
     prefix="/automation",
     tags=["automation"],
 )
+
+
+_background_tasks: set[asyncio.Task[None]] = set()
 
 
 async def _run_daily_pipeline_background(
@@ -71,6 +73,25 @@ async def _run_daily_pipeline_background(
         db.close()
 
 
+def _start_daily_pipeline_background(
+    *,
+    force: bool,
+) -> None:
+    task = asyncio.create_task(
+        _run_daily_pipeline_background(
+            force=force,
+        )
+    )
+
+    _background_tasks.add(
+        task
+    )
+
+    task.add_done_callback(
+        _background_tasks.discard
+    )
+
+
 def _verify_secret(
     provided: str | None,
 ) -> None:
@@ -92,8 +113,8 @@ def _verify_secret(
     if (
         provided is None
         or not secrets.compare_digest(
-            provided,
-            expected,
+            provided.encode("utf-8"),
+            expected.encode("utf-8"),
         )
     ):
         raise HTTPException(
@@ -109,7 +130,6 @@ def _verify_secret(
     "/daily"
 )
 async def run_daily_pipeline(
-    background_tasks: BackgroundTasks,
     force: bool = Query(
         default=False
     ),
@@ -129,8 +149,7 @@ async def run_daily_pipeline(
     )
 
     if not wait:
-        background_tasks.add_task(
-            _run_daily_pipeline_background,
+        _start_daily_pipeline_background(
             force=force,
         )
 
