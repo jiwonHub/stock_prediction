@@ -381,6 +381,16 @@ async def rebuild_analysis_snapshots_for_dev(
                 )
 
             (
+                sector_member_count,
+                minimum_samples,
+            ) = (
+                market_data_service
+                .get_sector_valuation_sample_requirement(
+                    sector_key=sector_key
+                )
+            )
+
+            (
                 per_sample_count,
                 pbr_sample_count,
                 fully_valid_codes,
@@ -453,11 +463,9 @@ async def rebuild_analysis_snapshots_for_dev(
             for peer in peers:
                 if (
                     per_sample_count
-                    >= MarketDataService
-                    .MIN_SECTOR_VALUATION_SAMPLES
+                    >= minimum_samples
                     and pbr_sample_count
-                    >= MarketDataService
-                    .MIN_SECTOR_VALUATION_SAMPLES
+                    >= minimum_samples
                 ):
                     break
 
@@ -516,18 +524,12 @@ async def rebuild_analysis_snapshots_for_dev(
                 sector_key
             )
 
-            minimum_samples = (
-                MarketDataService
-                .MIN_SECTOR_VALUATION_SAMPLES
-            )
-
             benchmark_ready = (
                 per_sample_count
                 >= minimum_samples
                 and pbr_sample_count
                 >= minimum_samples
             )
-
             sector_benchmarks.append(
                 {
                     "stockCode": stock_code,
@@ -536,6 +538,8 @@ async def rebuild_analysis_snapshots_for_dev(
                         per_sample_count,
                     "pbrSamples":
                         pbr_sample_count,
+                    "sectorMemberCount":
+                        sector_member_count,
                     "minimumSamples":
                         minimum_samples,
                     "peerAttempts":

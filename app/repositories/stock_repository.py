@@ -1480,6 +1480,42 @@ class StockRepository:
             self.db.scalars(stmt).all()
         )
     
+    def count_active_sector_members_by_key(
+        self,
+        *,
+        sector_key: str,
+    ) -> int:
+        key = sector_key.strip()
+
+        if not key:
+            return 0
+
+        stmt = (
+            select(
+                func.count(Stock.code)
+            )
+            .where(
+                Stock.is_active.is_(True),
+                Stock.market.in_(
+                    [
+                        "KOSPI",
+                        "KOSDAQ",
+                    ]
+                ),
+                or_(
+                    Stock.sector_code == key,
+                    and_(
+                        Stock.sector_code.is_(None),
+                        Stock.sector_name == key,
+                    ),
+                ),
+            )
+        )
+
+        return int(
+            self.db.scalar(stmt) or 0
+        )
+
     def update_market_sector_metadata(
         self,
         rows: list[dict],

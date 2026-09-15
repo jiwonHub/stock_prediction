@@ -2991,6 +2991,33 @@ class MarketDataService:
             )
         )
     
+    def get_sector_valuation_sample_requirement(
+        self,
+        *,
+        sector_key: str,
+    ) -> tuple[int, int]:
+        member_count = (
+            self.stock_repository
+            .count_active_sector_members_by_key(
+                sector_key=sector_key
+            )
+        )
+
+        minimum_samples = (
+            member_count
+            if 3 <= member_count < (
+                self.MIN_SECTOR_VALUATION_SAMPLES
+            )
+            else (
+                self.MIN_SECTOR_VALUATION_SAMPLES
+            )
+        )
+
+        return (
+            member_count,
+            minimum_samples,
+        )
+
     def refresh_valuation_benchmarks(
             self,
             *,
@@ -3103,6 +3130,41 @@ class MarketDataService:
                             sector_key
                         ].append(pbr)
 
+            sector_requirements: dict[
+                str,
+                tuple[int, int],
+            ] = {}
+
+            for sector_key in set(
+                sector_per_values
+            ) | set(
+                sector_pbr_values
+            ):
+                sector_requirements[
+                    sector_key
+                ] = (
+                    self
+                    .get_sector_valuation_sample_requirement(
+                        sector_key=sector_key
+                    )
+                )
+
+            def minimum_sector_samples(
+                sector_key: str,
+            ) -> int:
+                requirement = (
+                    sector_requirements.get(
+                        sector_key
+                    )
+                )
+
+                if requirement is None:
+                    return (
+                        self.MIN_SECTOR_VALUATION_SAMPLES
+                    )
+
+                return requirement[1]
+
             sector_per_median = {
                 key: float(
                     median(values)
@@ -3110,7 +3172,9 @@ class MarketDataService:
                 for key, values
                 in sector_per_values.items()
                 if len(values)
-                >= self.MIN_SECTOR_VALUATION_SAMPLES
+                >= minimum_sector_samples(
+                    key
+                )
             }
 
             sector_pbr_median = {
@@ -3120,7 +3184,9 @@ class MarketDataService:
                 for key, values
                 in sector_pbr_values.items()
                 if len(values)
-                >= self.MIN_SECTOR_VALUATION_SAMPLES
+                >= minimum_sector_samples(
+                    key
+                )
             }
 
             market_per_median = {
@@ -3211,6 +3277,30 @@ class MarketDataService:
                     else {}
                 )
 
+                sector_requirement = (
+                    sector_requirements.get(
+                        sector_key
+                    )
+                    if sector_key
+                    else None
+                )
+
+                sector_member_count = (
+                    sector_requirement[0]
+                    if sector_requirement
+                    is not None
+                    else 0
+                )
+
+                minimum_sector_sample_count = (
+                    sector_requirement[1]
+                    if sector_requirement
+                    is not None
+                    else (
+                        self.MIN_SECTOR_VALUATION_SAMPLES
+                    )
+                )
+
                 raw_json[
                     "valuation_benchmark"
                 ] = {
@@ -3218,6 +3308,8 @@ class MarketDataService:
                         market_key,
                     "sector_key":
                         sector_key,
+                    "sector_member_count":
+                        sector_member_count,
                     "sector_per_sample_count":
                         sector_per_sample_count,
                     "sector_pbr_sample_count":
@@ -3227,7 +3319,7 @@ class MarketDataService:
                     "market_pbr_sample_count":
                         market_pbr_sample_count,
                     "minimum_sector_sample_count":
-                        self.MIN_SECTOR_VALUATION_SAMPLES,
+                        minimum_sector_sample_count,
                     "minimum_market_sample_count":
                         self.MIN_MARKET_VALUATION_SAMPLES,
                 }
