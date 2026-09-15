@@ -2705,12 +2705,17 @@ class HistoricalMlOofService:
                             "date"
                         ].isoformat(),
 
-                    "ic_mean":
+                    "ic_mean": (
                         float(
                             np.mean(
                                 cohort_ic
                             )
-                        ),
+                        )
+                        if len(
+                            cohort_ic
+                        ) > 0
+                        else None
+                    ),
 
                     "top10_excess_mean_pct":
                         float(
@@ -2807,27 +2812,42 @@ class HistoricalMlOofService:
                     )
                 ),
 
-            "spearman_ic_mean":
+            "spearman_ic_mean": (
                 float(
                     np.mean(
                         ic_values
                     )
-                ),
+                )
+                if len(
+                    ic_values
+                ) > 0
+                else None
+            ),
 
-            "spearman_ic_std":
+            "spearman_ic_std": (
                 float(
                     np.std(
                         ic_values
                     )
-                ),
+                )
+                if len(
+                    ic_values
+                ) > 0
+                else None
+            ),
 
-            "spearman_ic_positive_rate_pct":
+            "spearman_ic_positive_rate_pct": (
                 float(
                     np.mean(
                         ic_values > 0.0
                     )
                     * 100.0
-                ),
+                )
+                if len(
+                    ic_values
+                ) > 0
+                else None
+            ),
 
             "universe_return_mean_pct":
                 float(
