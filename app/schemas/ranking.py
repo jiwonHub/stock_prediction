@@ -1,4 +1,4 @@
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class RankingResponse(BaseModel):
@@ -32,6 +32,10 @@ class RankingResponse(BaseModel):
     dataCoverage: float = 0.0
 
 class RankingFactorResponse(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+
     feature: str
     label: str
     value: float
@@ -48,10 +52,13 @@ class RankingFactorResponse(BaseModel):
 
 
 class RankingExplanationResponse(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+
     stockCode: str = Field(
         validation_alias="stock_code",
     )
-
     stockName: str = Field(
         validation_alias="stock_name",
     )
