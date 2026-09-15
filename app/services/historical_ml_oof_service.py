@@ -28,9 +28,6 @@ from app.repositories.market_data_repository import (
 from app.repositories.stock_repository import (
     StockRepository,
 )
-from app.services.composite_ranking_service import (
-    CompositeRankingService,
-)
 from app.services.historical_dataset_service import (
     HistoricalDatasetService,
 )
@@ -1282,6 +1279,10 @@ class HistoricalMlOofService:
                     ]
                 )
             )
+
+        from app.services.composite_ranking_service import (
+            CompositeRankingService,
+        )
 
         production_weights = (
             CompositeRankingService
