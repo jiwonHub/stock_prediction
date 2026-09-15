@@ -140,6 +140,7 @@ class HistoricalMlTrainingService:
         valid_ratio: float = (
             DEFAULT_VALID_RATIO
         ),
+        feature_strategy: str = "full",
     ) -> HistoricalMlSplitBundle:
         if horizon not in (
             self.SUPPORTED_HORIZONS
@@ -187,6 +188,9 @@ class HistoricalMlTrainingService:
                     feature_version
                 ),
                 horizon=horizon,
+                feature_strategy=(
+                    feature_strategy
+                ),
             )
         )
 

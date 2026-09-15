@@ -174,6 +174,7 @@ class HistoricalDatasetService:
         *,
         feature_version: str,
         horizon: int,
+        feature_strategy: str = "full",
     ) -> HistoricalDatasetBundle:
 
         target_column = (
@@ -189,9 +190,13 @@ class HistoricalDatasetService:
                 f"{horizon}"
             )
 
-        feature_names = list(
+        feature_names = (
             HistoricalFeatureService
-            .HISTORICAL_FEATURE_NAMES
+            .feature_names_for_strategy(
+                feature_strategy=(
+                    feature_strategy
+                )
+            )
         )
 
         snapshots = list(

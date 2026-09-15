@@ -97,6 +97,94 @@ class HistoricalFeatureService:
         "yield_curve_10y_3y_bp",
     )
 
+    @classmethod
+    def feature_names_for_strategy(
+        cls,
+        *,
+        feature_strategy: str,
+    ) -> list[str]:
+        supported = {
+            "full",
+            "no_market",
+            "no_sector",
+            "no_macro",
+            "no_disclosure",
+            "stock_internal_only",
+        }
+
+        if feature_strategy not in supported:
+            raise ValueError(
+                "지원하지 않는 Feature Strategy입니다: "
+                f"{feature_strategy}"
+            )
+
+        def is_macro(
+            feature_name: str,
+        ) -> bool:
+            return feature_name.startswith(
+                (
+                    "base_rate",
+                    "usdkrw",
+                    "ktb_",
+                    "yield_curve_",
+                )
+            )
+
+        feature_names: list[str] = []
+
+        for feature_name in (
+            cls.HISTORICAL_FEATURE_NAMES
+        ):
+            include = True
+
+            if feature_strategy == "no_market":
+                include = not feature_name.startswith(
+                    "market_"
+                )
+
+            elif feature_strategy == "no_sector":
+                include = not feature_name.startswith(
+                    "sector_"
+                )
+
+            elif feature_strategy == "no_macro":
+                include = not is_macro(
+                    feature_name
+                )
+
+            elif feature_strategy == "no_disclosure":
+                include = not feature_name.startswith(
+                    "disclosure_"
+                )
+
+            elif feature_strategy == "stock_internal_only":
+                include = not (
+                    feature_name.startswith(
+                        "market_"
+                    )
+                    or feature_name.startswith(
+                        "sector_"
+                    )
+                    or feature_name.startswith(
+                        "disclosure_"
+                    )
+                    or is_macro(
+                        feature_name
+                    )
+                )
+
+            if include:
+                feature_names.append(
+                    feature_name
+                )
+
+        if not feature_names:
+            raise ValueError(
+                "선택된 Historical Feature가 없습니다."
+            )
+
+        return feature_names
+
     def __init__(
         self,
         db: Session,
@@ -962,62 +1050,67 @@ class HistoricalFeatureService:
                 )
             )
 
-            if any(
-                value is None
-                for value
-                in (
-                    base_rate,
-                    usdkrw,
-                    ktb_3y,
-                    ktb_10y,
-                    usdkrw_change,
-                    ktb_3y_change,
-                    ktb_10y_change,
-                )
-            ):
-                skipped += 1
-                continue
-
             features.update(
                 {
-                    "base_rate_pct":
+                    "base_rate_pct": (
                         float(
                             base_rate
-                        ),
+                        )
+                        if base_rate is not None
+                        else None
+                    ),
 
-                    "usdkrw":
+                    "usdkrw": (
                         float(
                             usdkrw
-                        ),
+                        )
+                        if usdkrw is not None
+                        else None
+                    ),
 
-                    "usdkrw_change_20d":
+                    "usdkrw_change_20d": (
                         float(
                             usdkrw_change
-                        ),
+                        )
+                        if usdkrw_change is not None
+                        else None
+                    ),
 
-                    "ktb_3y_pct":
+                    "ktb_3y_pct": (
                         float(
                             ktb_3y
-                        ),
+                        )
+                        if ktb_3y is not None
+                        else None
+                    ),
 
-                    "ktb_10y_pct":
+                    "ktb_10y_pct": (
                         float(
                             ktb_10y
-                        ),
+                        )
+                        if ktb_10y is not None
+                        else None
+                    ),
 
-                    "ktb_3y_change_20d_bp":
+                    "ktb_3y_change_20d_bp": (
                         float(
                             ktb_3y_change
                         )
-                        * 100.0,
+                        * 100.0
+                        if ktb_3y_change is not None
+                        else None
+                    ),
 
-                    "ktb_10y_change_20d_bp":
+                    "ktb_10y_change_20d_bp": (
                         float(
                             ktb_10y_change
                         )
-                        * 100.0,
+                        * 100.0
+                        if ktb_10y_change is not None
+                        else None
+                    ),
 
-                    "yield_curve_10y_3y_bp":
+                    "yield_curve_10y_3y_bp": (
                         (
                             float(
                                 ktb_10y
@@ -1026,10 +1119,15 @@ class HistoricalFeatureService:
                                 ktb_3y
                             )
                         )
-                        * 100.0,
+                        * 100.0
+                        if (
+                            ktb_10y is not None
+                            and ktb_3y is not None
+                        )
+                        else None
+                    ),
                 }
             )
-
             actual_feature_set = set(
                 features.keys()
             )

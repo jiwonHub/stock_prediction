@@ -79,6 +79,9 @@ class HistoricalMlFinalModelService:
                     self.FEATURE_VERSION
                 ),
                 horizon=self.HORIZON,
+                feature_strategy=(
+                    self.FEATURE_STRATEGY
+                ),
             )
         )
 

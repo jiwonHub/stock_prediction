@@ -2736,6 +2736,9 @@ class HistoricalMlOofService:
                     feature_version
                 ),
                 horizon=horizon,
+                feature_strategy=(
+                    "stock_internal_only"
+                ),
             )
         )
 
@@ -2746,6 +2749,9 @@ class HistoricalMlOofService:
                     feature_version
                 ),
                 horizon=horizon,
+                feature_strategy=(
+                    "stock_internal_only"
+                ),
             )
         )
 
