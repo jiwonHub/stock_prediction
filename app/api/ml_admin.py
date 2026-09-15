@@ -15,7 +15,9 @@ from app.services.historical_ml_oof_service import (
 from app.services.historical_ml_final_model_service import (
     HistoricalMlFinalModelService,
 )
-
+from app.services.composite_ranking_service import (
+    CompositeRankingService,
+)
 
 router = APIRouter(
     prefix="/admin/ml",
@@ -403,6 +405,117 @@ def compare_historical_ml_horizons(
 
         "comparison":
             comparison,
+    }
+
+
+@router.post(
+    "/historical/oof/ml-weight-sweep",
+)
+def compare_historical_ml_weights(
+    feature_version: str = Query(
+        default=(
+            HistoricalMlFinalModelService
+            .FEATURE_VERSION
+        ),
+        min_length=1,
+        max_length=40,
+    ),
+    folds: int = Query(
+        default=4,
+        ge=3,
+        le=8,
+    ),
+    initial_train_ratio: float = Query(
+        default=0.55,
+        ge=0.40,
+        le=0.70,
+    ),
+    db: Session = Depends(
+        get_db
+    ),
+):
+    try:
+        result = (
+            HistoricalMlOofService(
+                db
+            )
+            .run(
+                feature_version=(
+                    feature_version
+                ),
+                horizon=(
+                    HistoricalMlFinalModelService
+                    .HORIZON
+                ),
+                folds=folds,
+                initial_train_ratio=(
+                    initial_train_ratio
+                ),
+            )
+        )
+
+    except ValueError as e:
+        raise HTTPException(
+            status_code=400,
+            detail=str(e),
+        ) from e
+
+    sweep = result[
+        "ml_weight_sweep"
+    ]
+
+    return {
+        "status":
+            "completed",
+
+        "phase":
+            "6.2",
+
+        "featureVersion":
+            feature_version,
+
+        "horizon":
+            HistoricalMlFinalModelService
+            .HORIZON,
+
+        "productionMlWeightPct":
+            (
+                CompositeRankingService
+                .WEIGHTS[
+                    "ml"
+                ]
+                * 100.0
+            ),
+
+        "testDatasetUsed":
+            result[
+                "test_dataset_used"
+            ],
+
+        "lockedTestFirstDate":
+            result[
+                "locked_test_first_date"
+            ],
+
+        "historicalFinancialCoverage":
+            result[
+                "historical_financial_coverage"
+            ],
+
+        "historicalFlowCoverage":
+            result[
+                "historical_flow_coverage"
+            ],
+
+        "proxyDefinition":
+            sweep[
+                "proxy_definition"
+            ],
+
+        "comparison":
+            sweep[
+                "results"
+            ],
     }
 
 

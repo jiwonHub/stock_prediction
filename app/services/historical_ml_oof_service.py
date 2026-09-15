@@ -28,6 +28,9 @@ from app.repositories.market_data_repository import (
 from app.repositories.stock_repository import (
     StockRepository,
 )
+from app.services.composite_ranking_service import (
+    CompositeRankingService,
+)
 from app.services.historical_dataset_service import (
     HistoricalDatasetService,
 )
@@ -1218,6 +1221,284 @@ class HistoricalMlOofService:
             )
 
         return results
+
+    @classmethod
+    def _ml_weight_sweep(
+        cls,
+        *,
+        probabilities: np.ndarray,
+        flow_scores: np.ndarray,
+        financial_scores: np.ndarray,
+        future_returns: np.ndarray,
+        stock_codes: list[str],
+        feature_dates: list,
+        rebalance_step: int,
+    ) -> dict:
+        ml_scores = np.zeros(
+            len(probabilities),
+            dtype=np.float64,
+        )
+
+        financial_rank_scores = np.full(
+            len(probabilities),
+            50.0,
+            dtype=np.float64,
+        )
+
+        indexes_by_date = {}
+
+        for index, feature_date in enumerate(
+            feature_dates
+        ):
+            indexes_by_date.setdefault(
+                feature_date,
+                [],
+            ).append(
+                index
+            )
+
+        for indexes in indexes_by_date.values():
+            index_array = np.asarray(
+                indexes,
+                dtype=np.int64,
+            )
+
+            ml_scores[
+                index_array
+            ] = (
+                cls._percentile_array(
+                    probabilities[
+                        index_array
+                    ]
+                )
+            )
+
+            financial_rank_scores[
+                index_array
+            ] = (
+                cls._percentile_array(
+                    financial_scores[
+                        index_array
+                    ]
+                )
+            )
+
+        production_weights = (
+            CompositeRankingService
+            .WEIGHTS
+        )
+
+        financial_source_weight = (
+            production_weights[
+                "quality"
+            ]
+            + production_weights[
+                "growth"
+            ]
+            + production_weights[
+                "financial_health"
+            ]
+        )
+
+        flow_source_weight = (
+            production_weights[
+                "flow"
+            ]
+        )
+
+        proxy_source_weight = (
+            financial_source_weight
+            + flow_source_weight
+        )
+
+        if proxy_source_weight <= 0.0:
+            raise ValueError(
+                "Historical Composite Proxy "
+                "가중치가 올바르지 않습니다."
+            )
+
+        proxy_financial_weight = (
+            financial_source_weight
+            / proxy_source_weight
+        )
+
+        proxy_flow_weight = (
+            flow_source_weight
+            / proxy_source_weight
+        )
+
+        baseline_scores = (
+            financial_rank_scores
+            * proxy_financial_weight
+            + flow_scores
+            * proxy_flow_weight
+        )
+
+        results = []
+
+        for ml_weight in (
+            0.0,
+            0.025,
+            0.05,
+            0.075,
+            0.10,
+        ):
+            composite_scores = (
+                baseline_scores
+                * (
+                    1.0
+                    - ml_weight
+                )
+                + ml_scores
+                * ml_weight
+            )
+
+            metrics = cls._ranking_metrics(
+                probabilities=(
+                    composite_scores
+                ),
+                future_returns=(
+                    future_returns
+                ),
+                stock_codes=(
+                    stock_codes
+                ),
+                feature_dates=(
+                    feature_dates
+                ),
+                rebalance_step=(
+                    rebalance_step
+                ),
+            )
+
+            top10_cost20 = next(
+                scenario
+                for scenario
+                in metrics[
+                    "portfolio_backtest"
+                ][
+                    "scenarios"
+                ]
+                if (
+                    scenario[
+                        "portfolio_size"
+                    ]
+                    == 10
+                    and scenario[
+                        "transaction_cost_bps"
+                    ]
+                    == 20.0
+                )
+            )
+
+            buffer_top10 = next(
+                scenario
+                for scenario
+                in metrics[
+                    "turnover_buffer_backtest"
+                ][
+                    "scenarios"
+                ]
+                if (
+                    scenario[
+                        "portfolio_size"
+                    ]
+                    == 10
+                    and scenario[
+                        "exit_rank"
+                    ]
+                    == 20
+                    and scenario[
+                        "transaction_cost_bps"
+                    ]
+                    == 20.0
+                )
+            )
+
+            results.append(
+                {
+                    "ml_weight":
+                        ml_weight,
+
+                    "ml_weight_pct":
+                        ml_weight
+                        * 100.0,
+
+                    "spearman_ic_mean":
+                        metrics[
+                            "spearman_ic_mean"
+                        ],
+
+                    "spearman_ic_positive_rate_pct":
+                        metrics[
+                            "spearman_ic_positive_rate_pct"
+                        ],
+
+                    "top10_excess_mean_pct":
+                        metrics[
+                            "top10_excess_mean_pct"
+                        ],
+
+                    "top10_excess_positive_rate_pct":
+                        metrics[
+                            "top10_excess_positive_rate_pct"
+                        ],
+
+                    "top20_excess_mean_pct":
+                        metrics[
+                            "top20_excess_mean_pct"
+                        ],
+
+                    "long_short_10_mean_pct":
+                        metrics[
+                            "long_short_10_mean_pct"
+                        ],
+
+                    "top10_cost20":
+                        top10_cost20[
+                            "summary"
+                        ],
+
+                    "buffer_top10_exit20_cost20":
+                        buffer_top10[
+                            "summary"
+                        ],
+                }
+            )
+
+        return {
+            "proxy_definition": {
+                "is_full_production_composite":
+                    False,
+
+                "financial_source_weight":
+                    financial_source_weight,
+
+                "flow_source_weight":
+                    flow_source_weight,
+
+                "normalized_financial_weight":
+                    proxy_financial_weight,
+
+                "normalized_flow_weight":
+                    proxy_flow_weight,
+
+                "excluded_production_factors": [
+                    "value",
+                    "relative_strength",
+                ],
+
+                "note": (
+                    "과거 시점 재현 가능한 "
+                    "financial_score와 flow만으로 "
+                    "구성한 Historical Proxy에 "
+                    "ML을 증분 적용한 검증"
+                ),
+            },
+
+            "results":
+                results,
+        }
 
     @classmethod
     def _portfolio_backtest(
@@ -3164,6 +3445,30 @@ class HistoricalMlOofService:
             )
         )
 
+        ml_weight_sweep = (
+            self._ml_weight_sweep(
+                probabilities=(
+                    oof_probability
+                ),
+                flow_scores=(
+                    historical_flow_scores
+                ),
+                financial_scores=(
+                    historical_financial_scores
+                ),
+                future_returns=(
+                    oof_future_return
+                ),
+                stock_codes=(
+                    all_stock_codes
+                ),
+                feature_dates=(
+                    all_feature_dates
+                ),
+                rebalance_step=horizon,
+            )
+        )
+
         oof_metrics = (
             self.calibration_service
             ._metrics(
@@ -3358,6 +3663,9 @@ class HistoricalMlOofService:
 
             "financial_weight_sweep":
                 financial_weight_sweep,
+
+            "ml_weight_sweep":
+                ml_weight_sweep,
 
             "folds":
                 fold_results,
