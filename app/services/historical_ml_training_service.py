@@ -7,6 +7,7 @@ import numpy as np
 from sqlalchemy.orm import Session
 
 from app.services.historical_dataset_service import (
+    HistoricalDatasetBundle,
     HistoricalDatasetService,
 )
 from app.services.historical_feature_service import (
@@ -141,6 +142,7 @@ class HistoricalMlTrainingService:
             DEFAULT_VALID_RATIO
         ),
         feature_strategy: str = "full",
+        dataset: HistoricalDatasetBundle | None = None,
     ) -> HistoricalMlSplitBundle:
         if horizon not in (
             self.SUPPORTED_HORIZONS
@@ -181,18 +183,19 @@ class HistoricalMlTrainingService:
                 "0.95 미만이어야 합니다."
             )
 
-        dataset = (
-            self.dataset_service
-            .build_dataset(
-                feature_version=(
-                    feature_version
-                ),
-                horizon=horizon,
-                feature_strategy=(
-                    feature_strategy
-                ),
+        if dataset is None:
+            dataset = (
+                self.dataset_service
+                .build_dataset(
+                    feature_version=(
+                        feature_version
+                    ),
+                    horizon=horizon,
+                    feature_strategy=(
+                        feature_strategy
+                    ),
+                )
             )
-        )
 
         unique_dates = sorted(
             set(

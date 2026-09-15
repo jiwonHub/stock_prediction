@@ -199,9 +199,12 @@ class HistoricalDatasetService:
             )
         )
 
-        snapshots = list(
-            self.db.scalars(
+        row_count = int(
+            self.db.scalar(
                 select(
+                    func.count()
+                )
+                .select_from(
                     StockFeatureSnapshot
                 )
                 .where(
@@ -214,31 +217,30 @@ class HistoricalDatasetService:
                         None
                     ),
                 )
-                .order_by(
-                    StockFeatureSnapshot
-                    .feature_date
-                    .asc(),
-
-                    StockFeatureSnapshot
-                    .stock_code
-                    .asc(),
-                )
-            ).all()
+            )
+            or 0
         )
 
-        if not snapshots:
+        if row_count <= 0:
             raise ValueError(
                 "학습 가능한 Historical Snapshot이 "
                 "없습니다."
             )
 
-        matrix_rows: list[
-            list[float]
-        ] = []
+        x = np.empty(
+            (
+                row_count,
+                len(
+                    feature_names
+                ),
+            ),
+            dtype=np.float32,
+        )
 
-        targets: list[
-            float
-        ] = []
+        y = np.empty(
+            row_count,
+            dtype=np.float32,
+        )
 
         stock_codes: list[
             str
@@ -248,17 +250,64 @@ class HistoricalDatasetService:
             date
         ] = []
 
-        for snapshot in snapshots:
+        statement = (
+            select(
+                StockFeatureSnapshot
+                .stock_code,
+                StockFeatureSnapshot
+                .feature_date,
+                StockFeatureSnapshot
+                .features,
+                target_column.label(
+                    "target_value"
+                ),
+            )
+            .where(
+                StockFeatureSnapshot
+                .feature_version
+                == feature_version,
+
+                target_column
+                .is_not(
+                    None
+                ),
+            )
+            .order_by(
+                StockFeatureSnapshot
+                .feature_date
+                .asc(),
+
+                StockFeatureSnapshot
+                .stock_code
+                .asc(),
+            )
+            .execution_options(
+                stream_results=True,
+                yield_per=1000,
+            )
+        )
+
+        rows = self.db.execute(
+            statement
+        )
+
+        row_index = 0
+
+        for (
+            stock_code,
+            feature_date,
+            features,
+            target_value,
+        ) in rows:
             features = (
-                snapshot.features
+                features
                 or {}
             )
 
-            row: list[
-                float
-            ] = []
-
-            for feature_name in (
+            for (
+                column_index,
+                feature_name,
+            ) in enumerate(
                 feature_names
             ):
                 if (
@@ -267,8 +316,8 @@ class HistoricalDatasetService:
                 ):
                     raise ValueError(
                         "Historical Feature 누락: "
-                        f"{snapshot.stock_code} "
-                        f"{snapshot.feature_date} "
+                        f"{stock_code} "
+                        f"{feature_date} "
                         f"{feature_name}"
                     )
 
@@ -281,8 +330,8 @@ class HistoricalDatasetService:
                 if value is None:
                     raise ValueError(
                         "Historical Feature NULL: "
-                        f"{snapshot.stock_code} "
-                        f"{snapshot.feature_date} "
+                        f"{stock_code} "
+                        f"{feature_date} "
                         f"{feature_name}"
                     )
 
@@ -297,8 +346,8 @@ class HistoricalDatasetService:
                 ) as e:
                     raise ValueError(
                         "Historical Feature 비숫자: "
-                        f"{snapshot.stock_code} "
-                        f"{snapshot.feature_date} "
+                        f"{stock_code} "
+                        f"{feature_date} "
                         f"{feature_name}="
                         f"{value}"
                     ) from e
@@ -309,22 +358,15 @@ class HistoricalDatasetService:
                     raise ValueError(
                         "Historical Feature "
                         "NaN/Infinity: "
-                        f"{snapshot.stock_code} "
-                        f"{snapshot.feature_date} "
+                        f"{stock_code} "
+                        f"{feature_date} "
                         f"{feature_name}"
                     )
 
-                row.append(
-                    number
-                )
-
-            target_value = getattr(
-                snapshot,
-                target_column.key,
-            )
-
-            if target_value is None:
-                continue
+                x[
+                    row_index,
+                    column_index,
+                ] = number
 
             target = float(
                 target_value
@@ -335,35 +377,31 @@ class HistoricalDatasetService:
             ):
                 raise ValueError(
                     "Target NaN/Infinity: "
-                    f"{snapshot.stock_code} "
-                    f"{snapshot.feature_date}"
+                    f"{stock_code} "
+                    f"{feature_date}"
                 )
 
-            matrix_rows.append(
-                row
-            )
-
-            targets.append(
-                target
-            )
+            y[
+                row_index
+            ] = target
 
             stock_codes.append(
-                snapshot.stock_code
+                str(
+                    stock_code
+                )
             )
 
             feature_dates.append(
-                snapshot.feature_date
+                feature_date
             )
 
-        x = np.asarray(
-            matrix_rows,
-            dtype=np.float64,
-        )
+            row_index += 1
 
-        y = np.asarray(
-            targets,
-            dtype=np.float64,
-        )
+        if row_index != row_count:
+            raise ValueError(
+                "Historical Dataset 행 수가 "
+                "조회 중 변경되었습니다."
+            )
 
         if (
             x.ndim != 2
@@ -438,6 +476,9 @@ class HistoricalDatasetService:
                     feature_version
                 ),
                 horizon=horizon,
+                feature_strategy=(
+                    "stock_internal_only"
+                ),
             )
         )
 

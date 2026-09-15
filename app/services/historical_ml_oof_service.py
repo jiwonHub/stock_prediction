@@ -2729,19 +2729,6 @@ class HistoricalMlOofService:
         folds: int = 4,
         initial_train_ratio: float = 0.55,
     ) -> dict:
-        temporal_split = (
-            self.training_service
-            .build_temporal_split(
-                feature_version=(
-                    feature_version
-                ),
-                horizon=horizon,
-                feature_strategy=(
-                    "stock_internal_only"
-                ),
-            )
-        )
-
         dataset = (
             self.dataset_service
             .build_dataset(
@@ -2752,6 +2739,20 @@ class HistoricalMlOofService:
                 feature_strategy=(
                     "stock_internal_only"
                 ),
+            )
+        )
+
+        temporal_split = (
+            self.training_service
+            .build_temporal_split(
+                feature_version=(
+                    feature_version
+                ),
+                horizon=horizon,
+                feature_strategy=(
+                    "stock_internal_only"
+                ),
+                dataset=dataset,
             )
         )
 
