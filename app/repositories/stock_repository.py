@@ -733,6 +733,7 @@ class StockRepository:
         self,
         *,
         limit: int,
+        offset: int = 0,
     ) -> list[str]:
         stmt = (
             select(Stock.code)
@@ -741,6 +742,7 @@ class StockRepository:
                 Stock.current_price.desc().nullslast(),
                 Stock.code.asc(),
             )
+            .offset(offset)
             .limit(limit)
         )
         return list(self.db.scalars(stmt).all())
@@ -784,6 +786,7 @@ class StockRepository:
         business_year: str,
         report_code: str,
         limit: int,
+        offset: int = 0,
     ) -> list[str]:
         stmt = (
             select(FinancialStatement.stock_code)
@@ -793,6 +796,7 @@ class StockRepository:
             )
             .distinct()
             .order_by(FinancialStatement.stock_code.asc())
+            .offset(offset)
             .limit(limit)
         )
         return list(self.db.scalars(stmt).all())

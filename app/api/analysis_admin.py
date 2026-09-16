@@ -25,6 +25,7 @@ async def analyze_financials_batch(
     year: int | None = Query(default=None, ge=2015, le=2100),
     report_code: str = Query(default="11011", pattern="^(11011|11012|11013|11014)$"),
     limit: int = Query(default=100, ge=1, le=500),
+    offset: int = Query(default=0, ge=0),
     sync_missing: bool = Query(default=True),
     db: Session = Depends(get_db),
 ):
@@ -32,12 +33,16 @@ async def analyze_financials_batch(
     service = FinancialAnalysisService(db)
 
     stock_codes = (
-        service.repository.get_stock_codes_for_analysis(limit=limit)
+        service.repository.get_stock_codes_for_analysis(
+            limit=limit,
+            offset=offset,
+        )
         if sync_missing
         else service.repository.get_stock_codes_with_financials(
             business_year=business_year,
             report_code=report_code,
             limit=limit,
+            offset=offset,
         )
     )
 
