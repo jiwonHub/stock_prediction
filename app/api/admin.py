@@ -1839,8 +1839,8 @@ async def sync_historical_disclosures(
             )
 
             try:
-                result = (
-                    await disclosure_service
+                sync_task = asyncio.create_task(
+                    disclosure_service
                     .sync_disclosures_history(
                         stock_code=(
                             stock_code
@@ -1853,6 +1853,30 @@ async def sync_historical_disclosures(
                         ),
                     )
                 )
+
+                try:
+                    while not sync_task.done():
+                        done, _ = await asyncio.wait(
+                            {sync_task},
+                            timeout=10.0,
+                        )
+
+                        if not done:
+                            yield (
+                                f"[{index}/{total}] "
+                                f"{stock_code} 처리중...\n"
+                            )
+
+                    result = await sync_task
+
+                finally:
+                    if not sync_task.done():
+                        sync_task.cancel()
+
+                        try:
+                            await sync_task
+                        except asyncio.CancelledError:
+                            pass
 
                 success += 1
 
