@@ -1767,6 +1767,11 @@ async def sync_historical_disclosures(
         ge=1,
         le=100,
     ),
+    offset: int = Query(
+        default=0,
+        ge=0,
+        le=99,
+    ),
     days: int = Query(
         default=1200,
         ge=365,
@@ -1789,11 +1794,18 @@ async def sync_historical_disclosures(
     )
 
     async def generate():
-        stock_codes = (
+        universe_stock_codes = (
             universe_service
             .get_current_universe_stock_codes(
-                limit=limit,
+                limit=100,
             )
+        )
+
+        stock_codes = (
+            universe_stock_codes[
+                offset:
+                offset + limit
+            ]
         )
 
         total = len(
