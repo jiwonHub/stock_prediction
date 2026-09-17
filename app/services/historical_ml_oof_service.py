@@ -3030,6 +3030,8 @@ class HistoricalMlOofService:
         horizon: int = 5,
         folds: int = 4,
         initial_train_ratio: float = 0.55,
+        excluded_features: set[str] | None = None,
+        comparison_only: bool = False,
     ) -> dict:
         dataset = (
             self.dataset_service
@@ -3078,6 +3080,46 @@ class HistoricalMlOofService:
             )
         )
 
+        base_selected_feature_names = [
+            dataset.feature_names[
+                index
+            ]
+            for index
+            in selected_indexes
+        ]
+
+        excluded_feature_set = set(
+            excluded_features
+            or set()
+        )
+
+        unknown_excluded_features = (
+            excluded_feature_set
+            - set(
+                base_selected_feature_names
+            )
+        )
+
+        if unknown_excluded_features:
+            raise ValueError(
+                "존재하지 않는 제외 Feature: "
+                + ", ".join(
+                    sorted(
+                        unknown_excluded_features
+                    )
+                )
+            )
+
+        selected_indexes = [
+            index
+            for index
+            in selected_indexes
+            if dataset.feature_names[
+                index
+            ]
+            not in excluded_feature_set
+        ]
+
         selected_feature_names = [
             dataset.feature_names[
                 index
@@ -3085,6 +3127,11 @@ class HistoricalMlOofService:
             for index
             in selected_indexes
         ]
+
+        if not selected_indexes:
+            raise ValueError(
+                "선택된 ML Feature가 없습니다."
+            )
 
         eligible_dates = sorted(
             {
@@ -3392,6 +3439,175 @@ class HistoricalMlOofService:
                 rebalance_step=horizon,
             )
         )
+
+        if comparison_only:
+            comparison_probability_metrics = (
+                self.calibration_service
+                ._metrics(
+                    y_true=(
+                        oof_y
+                    ),
+                    probability=(
+                        oof_probability
+                    ),
+                )
+            )
+
+            top10_cost20 = next(
+                scenario
+                for scenario
+                in ranking_metrics[
+                    "portfolio_backtest"
+                ][
+                    "scenarios"
+                ]
+                if (
+                    scenario[
+                        "portfolio_size"
+                    ] == 10
+                    and scenario[
+                        "transaction_cost_bps"
+                    ] == 20.0
+                )
+            )
+
+            buffer_top10_exit20_cost20 = next(
+                scenario
+                for scenario
+                in ranking_metrics[
+                    "turnover_buffer_backtest"
+                ][
+                    "scenarios"
+                ]
+                if (
+                    scenario[
+                        "portfolio_size"
+                    ] == 10
+                    and scenario[
+                        "exit_rank"
+                    ] == 20
+                    and scenario[
+                        "transaction_cost_bps"
+                    ] == 20.0
+                )
+            )
+
+            return {
+                "status":
+                    "pass",
+
+                "feature_version":
+                    feature_version,
+
+                "target_horizon":
+                    horizon,
+
+                "feature_strategy":
+                    "stock_internal_only",
+
+                "feature_count":
+                    len(
+                        selected_feature_names
+                    ),
+
+                "feature_names":
+                    selected_feature_names,
+
+                "excluded_features":
+                    sorted(
+                        excluded_feature_set
+                    ),
+
+                "fold_count":
+                    folds,
+
+                "test_dataset_used":
+                    False,
+
+                "locked_test_first_date":
+                    locked_test_first_date
+                    .isoformat(),
+
+                "oof_rows":
+                    int(
+                        len(
+                            oof_y
+                        )
+                    ),
+
+                "roc_auc":
+                    comparison_probability_metrics[
+                        "roc_auc"
+                    ],
+
+                "log_loss":
+                    comparison_probability_metrics[
+                        "log_loss"
+                    ],
+
+                "brier_score":
+                    comparison_probability_metrics[
+                        "brier_score"
+                    ],
+
+                "ece_10":
+                    comparison_probability_metrics[
+                        "ece_10"
+                    ],
+
+                "spearman_ic_mean":
+                    ranking_metrics[
+                        "spearman_ic_mean"
+                    ],
+
+                "spearman_ic_positive_rate_pct":
+                    ranking_metrics[
+                        "spearman_ic_positive_rate_pct"
+                    ],
+
+                "top10_excess_mean_pct":
+                    ranking_metrics[
+                        "top10_excess_mean_pct"
+                    ],
+
+                "top10_excess_positive_rate_pct":
+                    ranking_metrics[
+                        "top10_excess_positive_rate_pct"
+                    ],
+
+                "top20_excess_mean_pct":
+                    ranking_metrics[
+                        "top20_excess_mean_pct"
+                    ],
+
+                "top20_excess_positive_rate_pct":
+                    ranking_metrics[
+                        "top20_excess_positive_rate_pct"
+                    ],
+
+                "long_short_10_mean_pct":
+                    ranking_metrics[
+                        "long_short_10_mean_pct"
+                    ],
+
+                "long_short_10_positive_rate_pct":
+                    ranking_metrics[
+                        "long_short_10_positive_rate_pct"
+                    ],
+
+                "top10_cost20":
+                    top10_cost20[
+                        "summary"
+                    ],
+
+                "buffer_top10_exit20_cost20":
+                    buffer_top10_exit20_cost20[
+                        "summary"
+                    ],
+
+                "folds":
+                    fold_results,
+            }
 
         (
             historical_flow_scores,

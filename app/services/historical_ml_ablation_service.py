@@ -910,6 +910,96 @@ class HistoricalMlAblationService:
                 harmful_features,
         }
 
+    def run_oof_feature_subset_experiment(
+        self,
+        *,
+        feature_version: str,
+        experiment: str,
+        horizon: int = 5,
+        folds: int = 4,
+        initial_train_ratio: float = 0.55,
+    ) -> dict:
+        experiments = {
+            "full_27": set(),
+
+            "no_adx_14": {
+                "adx_14",
+            },
+
+            "no_rsi_14": {
+                "rsi_14",
+            },
+
+            "no_adx_rsi": {
+                "adx_14",
+                "rsi_14",
+            },
+
+            "no_flagged_4": {
+                "stochastic_d_3",
+                "adx_14",
+                "macd_hist_ratio",
+                "rsi_14",
+            },
+        }
+
+        if experiment not in experiments:
+            raise ValueError(
+                "지원하지 않는 Feature subset 실험: "
+                f"{experiment}"
+            )
+
+        removed_features = (
+            experiments[
+                experiment
+            ]
+        )
+
+        result = (
+            HistoricalMlOofService(
+                self.db
+            )
+            .run(
+                feature_version=(
+                    feature_version
+                ),
+                horizon=horizon,
+                folds=folds,
+                initial_train_ratio=(
+                    initial_train_ratio
+                ),
+                excluded_features=(
+                    removed_features
+                ),
+                comparison_only=True,
+            )
+        )
+
+        return {
+            "status":
+                "pass",
+
+            "phase":
+                "6.3-2",
+
+            "experiment":
+                experiment,
+
+            "removed_features":
+                sorted(
+                    removed_features
+                ),
+
+            "comparison_rule":
+                (
+                    "동일 OOF 기간, 동일 XGBoost "
+                    "파라미터에서 지정 Feature를 제거한 뒤 "
+                    "모델을 처음부터 재학습"
+                ),
+
+            **result,
+        }
+
     def run_validation_ablation(
         self,
         *,

@@ -463,6 +463,67 @@ def inspect_historical_feature_permutation(
 
 
 @router.post(
+    "/historical/oof/feature-subset-compare",
+)
+def compare_historical_feature_subset(
+    experiment: str = Query(
+        ...,
+        min_length=1,
+        max_length=40,
+    ),
+    feature_version: str = Query(
+        default=(
+            HistoricalMlFinalModelService
+            .FEATURE_VERSION
+        ),
+        min_length=1,
+        max_length=40,
+    ),
+    folds: int = Query(
+        default=4,
+        ge=3,
+        le=8,
+    ),
+    initial_train_ratio: float = Query(
+        default=0.55,
+        ge=0.40,
+        le=0.70,
+    ),
+    db: Session = Depends(
+        get_db
+    ),
+):
+    try:
+        return (
+            HistoricalMlAblationService(
+                db
+            )
+            .run_oof_feature_subset_experiment(
+                feature_version=(
+                    feature_version
+                ),
+                experiment=(
+                    experiment
+                ),
+                horizon=(
+                    HistoricalMlFinalModelService
+                    .HORIZON
+                ),
+                folds=folds,
+                initial_train_ratio=(
+                    initial_train_ratio
+                ),
+            )
+        )
+
+    except ValueError as e:
+        raise HTTPException(
+            status_code=400,
+            detail=str(e),
+        ) from e
+
+
+@router.post(
     "/historical/oof/ml-weight-sweep",
 )
 def compare_historical_ml_weights(
