@@ -15,6 +15,9 @@ from app.services.historical_ml_oof_service import (
 from app.services.historical_ml_final_model_service import (
     HistoricalMlFinalModelService,
 )
+from app.services.historical_ml_ablation_service import (
+    HistoricalMlAblationService,
+)
 from app.services.composite_ranking_service import (
     CompositeRankingService,
 )
@@ -406,6 +409,57 @@ def compare_historical_ml_horizons(
         "comparison":
             comparison,
     }
+@router.post(
+    "/historical/oof/feature-permutation",
+)
+def inspect_historical_feature_permutation(
+    feature_version: str = Query(
+        default=(
+            HistoricalMlFinalModelService
+            .FEATURE_VERSION
+        ),
+        min_length=1,
+        max_length=40,
+    ),
+    folds: int = Query(
+        default=4,
+        ge=3,
+        le=8,
+    ),
+    initial_train_ratio: float = Query(
+        default=0.55,
+        ge=0.40,
+        le=0.70,
+    ),
+    db: Session = Depends(
+        get_db
+    ),
+):
+    try:
+        return (
+            HistoricalMlAblationService(
+                db
+            )
+            .run_oof_feature_permutation(
+                feature_version=(
+                    feature_version
+                ),
+                horizon=(
+                    HistoricalMlFinalModelService
+                    .HORIZON
+                ),
+                folds=folds,
+                initial_train_ratio=(
+                    initial_train_ratio
+                ),
+            )
+        )
+
+    except ValueError as e:
+        raise HTTPException(
+            status_code=400,
+            detail=str(e),
+        ) from e
 
 
 @router.post(
