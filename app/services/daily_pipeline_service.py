@@ -1488,9 +1488,10 @@ class DailyPipelineService:
 
                 self._update_run_progress(
                     run_id,
-                    stage="top_context",
+                    stage="top_news",
                     current=0,
                     total=top_context_total,
+                    force=True,
                 )
 
                 for (
@@ -1502,7 +1503,7 @@ class DailyPipelineService:
                 ):
                     self._update_run_progress(
                         run_id,
-                        stage="top_context",
+                        stage="top_news",
                         current=index,
                         total=top_context_total,
                         stock_code=(
@@ -1534,6 +1535,39 @@ class DailyPipelineService:
                             flush=True,
                         )
 
+                self._update_run_progress(
+                    run_id,
+                    stage="top_news",
+                    current=top_context_total,
+                    total=top_context_total,
+                    force=True,
+                )
+
+                self._update_run_progress(
+                    run_id,
+                    stage="top_disclosures",
+                    current=0,
+                    total=top_context_total,
+                    force=True,
+                )
+
+                for (
+                    index,
+                    row,
+                ) in enumerate(
+                    top_context_rows,
+                    start=1,
+                ):
+                    self._update_run_progress(
+                        run_id,
+                        stage="top_disclosures",
+                        current=index,
+                        total=top_context_total,
+                        stock_code=(
+                            row.stockCode
+                        ),
+                    )
+
                     try:
                         top_disclosure_rows += await (
                             self.market_context_service
@@ -1557,6 +1591,14 @@ class DailyPipelineService:
                             f"failed: {e}",
                             flush=True,
                         )
+
+                self._update_run_progress(
+                    run_id,
+                    stage="top_disclosures",
+                    current=top_context_total,
+                    total=top_context_total,
+                    force=True,
+                )
 
                 self.market_context_service.record_rankings(
                     rankings,
