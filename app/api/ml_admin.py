@@ -1,4 +1,8 @@
 from fastapi import APIRouter, Depends, HTTPException, Query
+from sqlalchemy import (
+    func,
+    select,
+)
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
@@ -23,6 +27,15 @@ from app.services.composite_ranking_service import (
 )
 from app.services.ml_ranking_inference_service import (
     MlRankingInferenceService,
+)
+from app.models.stock_price import (
+    StockPrice,
+)
+from app.services.market_context_service import (
+    MarketContextService,
+)
+from app.services.stock_service import (
+    StockService,
 )
 
 router = APIRouter(
@@ -64,6 +77,261 @@ def refit_historical_final_model(
         ValueError,
         RuntimeError,
     ) as e:
+        raise HTTPException(
+            status_code=400,
+            detail=str(e),
+        ) from e
+
+
+@router.post(
+    "/historical/final-model/refresh-ranking-snapshot",
+)
+async def refresh_final_model_ranking_snapshot(
+    confirm: bool = Query(
+        default=False,
+    ),
+    limit: int = Query(
+        default=100,
+        ge=10,
+        le=100,
+    ),
+    db: Session = Depends(
+        get_db
+    ),
+):
+    if not confirm:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "최신 Final Model로 RankingSnapshot을 "
+                "교체합니다. 실행하려면 "
+                "confirm=true를 지정하세요."
+            ),
+        )
+
+    latest_market_date = db.scalar(
+        select(
+            func.max(
+                StockPrice.trade_date
+            )
+        )
+    )
+
+    if latest_market_date is None:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "최신 시장 날짜를 "
+                "확인할 수 없습니다."
+            ),
+        )
+
+    try:
+        stock_service = (
+            StockService(
+                db
+            )
+        )
+
+        recomputed = await (
+            stock_service
+            .get_rankings(
+                limit=limit,
+                force_recompute=True,
+            )
+        )
+
+        if len(recomputed) < 10:
+            raise RuntimeError(
+                "재계산된 Ranking이 "
+                "10종목 미만입니다."
+            )
+
+        (
+            MarketContextService(
+                db
+            )
+            .record_rankings(
+                recomputed,
+                as_of_date=(
+                    latest_market_date
+                ),
+                replace_existing=True,
+            )
+        )
+
+        cached = await (
+            stock_service
+            .get_rankings(
+                limit=limit,
+                force_recompute=False,
+            )
+        )
+
+        if len(cached) != len(
+            recomputed
+        ):
+            raise RuntimeError(
+                "RankingSnapshot 저장 전후 "
+                "종목 수가 다릅니다: "
+                f"recomputed={len(recomputed)}, "
+                f"cached={len(cached)}"
+            )
+
+        mismatches = []
+
+        for (
+            expected,
+            actual,
+        ) in zip(
+            recomputed,
+            cached,
+        ):
+            stock_matches = (
+                expected.stockCode
+                == actual.stockCode
+            )
+
+            rank_matches = (
+                int(
+                    expected.rank
+                )
+                == int(
+                    actual.rank
+                )
+            )
+
+            total_score_matches = (
+                abs(
+                    float(
+                        expected.totalScore
+                    )
+                    - float(
+                        actual.totalScore
+                    )
+                )
+                <= 0.001
+            )
+
+            ml_score_matches = (
+                abs(
+                    float(
+                        expected.mlScore
+                    )
+                    - float(
+                        actual.mlScore
+                    )
+                )
+                <= 0.001
+            )
+
+            if (
+                not stock_matches
+                or not rank_matches
+                or not total_score_matches
+                or not ml_score_matches
+            ):
+                mismatches.append(
+                    {
+                        "expected": {
+                            "rank":
+                                expected.rank,
+
+                            "stockCode":
+                                expected.stockCode,
+
+                            "totalScore":
+                                expected.totalScore,
+
+                            "mlScore":
+                                expected.mlScore,
+                        },
+
+                        "actual": {
+                            "rank":
+                                actual.rank,
+
+                            "stockCode":
+                                actual.stockCode,
+
+                            "totalScore":
+                                actual.totalScore,
+
+                            "mlScore":
+                                actual.mlScore,
+                        },
+                    }
+                )
+
+        if mismatches:
+            raise RuntimeError(
+                "RankingSnapshot 저장 후 "
+                "재조회 결과가 재계산 결과와 "
+                "일치하지 않습니다: "
+                f"{mismatches[:5]}"
+            )
+
+        return {
+            "status":
+                "pass",
+
+            "phase":
+                "7.4",
+
+            "snapshot_date":
+                latest_market_date
+                .isoformat(),
+
+            "ranking_version":
+                MarketContextService
+                .RANKING_VERSION,
+
+            "recomputed_count":
+                len(
+                    recomputed
+                ),
+
+            "persisted_count":
+                len(
+                    cached
+                ),
+
+            "mismatch_count":
+                len(
+                    mismatches
+                ),
+
+            "top10": [
+                {
+                    "rank":
+                        row.rank,
+
+                    "stock_code":
+                        row.stockCode,
+
+                    "stock_name":
+                        row.stockName,
+
+                    "total_score":
+                        row.totalScore,
+
+                    "ml_score":
+                        row.mlScore,
+
+                    "data_coverage":
+                        row.dataCoverage,
+                }
+                for row
+                in cached[:10]
+            ],
+        }
+
+    except (
+        RuntimeError,
+        ValueError,
+    ) as e:
+        db.rollback()
+
         raise HTTPException(
             status_code=400,
             detail=str(e),
