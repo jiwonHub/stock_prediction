@@ -44,6 +44,9 @@ class DailyPipelineService:
 
     TOP_CONTEXT_LIMIT = 100
 
+    DAILY_RUN_HOUR = 16
+    DAILY_RUN_MINUTE = 40
+
     RECENT_PRICE_DAYS = 14
     BOOTSTRAP_PRICE_DAYS = 1200
     MIN_HISTORY_ROWS = 61
@@ -696,7 +699,11 @@ class DailyPipelineService:
             }
 
         async with self._run_lock:
-            today = self._today()
+            now_kst = datetime.now(
+                self.KST
+            )
+
+            today = now_kst.date()
 
             stale_runs_recovered = (
                 self._recover_stale_runs()
@@ -724,6 +731,46 @@ class DailyPipelineService:
                         "reason": "weekend",
                         "date": (
                             today.isoformat()
+                        ),
+                    }
+
+                    self._finish_run(
+                        run_id,
+                        status="skipped",
+                        metadata=result,
+                    )
+
+                    return result
+
+                if (
+                    not force
+                    and (
+                        now_kst.hour
+                        < self.DAILY_RUN_HOUR
+                        or (
+                            now_kst.hour
+                            == self.DAILY_RUN_HOUR
+                            and now_kst.minute
+                            < self.DAILY_RUN_MINUTE
+                        )
+                    )
+                ):
+                    result = {
+                        "status": "skipped",
+                        "reason": (
+                            "before_scheduled_time"
+                        ),
+                        "date": (
+                            today.isoformat()
+                        ),
+                        "currentTimeKst": (
+                            now_kst.strftime(
+                                "%H:%M"
+                            )
+                        ),
+                        "scheduledTimeKst": (
+                            f"{self.DAILY_RUN_HOUR:02d}:"
+                            f"{self.DAILY_RUN_MINUTE:02d}"
                         ),
                     }
 
