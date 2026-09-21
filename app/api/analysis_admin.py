@@ -4,6 +4,9 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
+from app.api.admin_operation_guard import (
+    ensure_daily_pipeline_not_running,
+)
 from app.core.database import get_db
 from app.core.exceptions import ConfigurationError, ExternalApiError
 from app.schemas.financial import FinancialAnalysisResponse, FinancialBatchResponse
@@ -14,8 +17,12 @@ from app.services.stock_service import StockService
 router = APIRouter(
     prefix="/admin/analyze",
     tags=["admin-analysis"],
+    dependencies=[
+        Depends(
+            ensure_daily_pipeline_not_running
+        ),
+    ],
 )
-
 
 @router.post(
     "/financials/batch",

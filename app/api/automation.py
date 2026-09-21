@@ -607,6 +607,29 @@ async def rebuild_analysis_snapshots_for_dev(
     }
 
 @router.get(
+    "/runs"
+)
+def get_automation_runs(
+    limit: int = Query(
+        default=20,
+        ge=1,
+        le=50,
+    ),
+    db: Session = Depends(
+        get_db
+    ),
+):
+    return (
+        DailyPipelineService(
+            db
+        )
+        .get_run_history(
+            limit=limit
+        )
+    )
+
+
+@router.get(
     "/status"
 )
 def get_automation_status(

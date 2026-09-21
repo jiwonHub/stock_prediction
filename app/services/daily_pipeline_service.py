@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from functools import wraps
 from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
@@ -175,6 +177,90 @@ class DailyPipelineService:
     }
 
     _run_lock = asyncio.Lock()
+
+    @classmethod
+    @asynccontextmanager
+    async def manual_operation_guard(
+        cls,
+    ) -> AsyncIterator[bool]:
+        if (
+            engine.dialect.name
+            != "postgresql"
+        ):
+            if cls._run_lock.locked():
+                yield False
+                return
+
+            await cls._run_lock.acquire()
+
+            try:
+                yield True
+            finally:
+                cls._run_lock.release()
+
+            return
+
+        connection = (
+            engine.connect()
+        )
+
+        acquired = False
+
+        try:
+            acquired = bool(
+                connection.scalar(
+                    text(
+                        """
+                        SELECT pg_try_advisory_lock(
+                            :lock_key
+                        )
+                        """
+                    ),
+                    {
+                        "lock_key": (
+                            _DAILY_PIPELINE_ADVISORY_LOCK_KEY
+                        ),
+                    },
+                )
+            )
+
+            connection.commit()
+
+            if not acquired:
+                yield False
+                return
+
+            yield True
+
+        finally:
+            if acquired:
+                try:
+                    connection.scalar(
+                        text(
+                            """
+                            SELECT pg_advisory_unlock(
+                                :lock_key
+                            )
+                            """
+                        ),
+                        {
+                            "lock_key": (
+                                _DAILY_PIPELINE_ADVISORY_LOCK_KEY
+                            ),
+                        },
+                    )
+
+                    connection.commit()
+
+                except Exception as e:
+                    print(
+                        "[DAILY][MANUAL-GUARD] "
+                        "unlock failed: "
+                        f"{type(e).__name__}: {e}",
+                        flush=True,
+                    )
+
+            connection.close()
 
     def __init__(
         self,
@@ -2407,6 +2493,154 @@ class DailyPipelineService:
                 )
 
                 raise
+
+    def get_run_history(
+        self,
+        *,
+        limit: int = 20,
+    ) -> dict:
+        runs = self.db.scalars(
+            select(
+                DataSyncRun
+            )
+            .where(
+                DataSyncRun.source
+                == "automation",
+                DataSyncRun.sync_type
+                == "daily_pipeline",
+            )
+            .order_by(
+                DataSyncRun.started_at.desc(),
+                DataSyncRun.id.desc(),
+            )
+            .limit(
+                limit
+            )
+        ).all()
+
+        items: list[dict] = []
+
+        for run in runs:
+            metadata = (
+                run.metadata_json
+                or {}
+            )
+
+            error = (
+                metadata.get(
+                    "error"
+                )
+                or {}
+            )
+
+            progress = (
+                metadata.get(
+                    "failedProgress"
+                )
+                or metadata.get(
+                    "progress"
+                )
+                or {}
+            )
+
+            items.append(
+                {
+                    "id": int(
+                        run.id
+                    ),
+                    "status": (
+                        run.status
+                    ),
+                    "date": (
+                        metadata.get(
+                            "date"
+                        )
+                    ),
+                    "startedAt": (
+                        run.started_at.isoformat()
+                        if run.started_at
+                        else None
+                    ),
+                    "finishedAt": (
+                        run.finished_at.isoformat()
+                        if run.finished_at
+                        else None
+                    ),
+                    "requestedCount": (
+                        run.requested_count
+                    ),
+                    "successCount": (
+                        run.success_count
+                    ),
+                    "failureCount": (
+                        run.failure_count
+                    ),
+                    "durationSeconds": (
+                        metadata.get(
+                            "durationSeconds"
+                        )
+                    ),
+                    "refreshCompleted": (
+                        metadata.get(
+                            "refreshCompleted"
+                        )
+                        is True
+                    ),
+                    "resultStatus": (
+                        metadata.get(
+                            "status"
+                        )
+                    ),
+                    "failedStage": (
+                        metadata.get(
+                            "failedStage"
+                        )
+                    ),
+                    "failedStageLabel": (
+                        metadata.get(
+                            "failedStageLabel"
+                        )
+                    ),
+                    "failedStockCode": (
+                        metadata.get(
+                            "failedStockCode"
+                        )
+                    ),
+                    "failedAt": (
+                        metadata.get(
+                            "failedAt"
+                        )
+                    ),
+                    "exceptionType": (
+                        metadata.get(
+                            "exceptionType"
+                        )
+                    ),
+                    "errorMessage": (
+                        error.get(
+                            "message"
+                        )
+                        or run.error_message
+                    ),
+                    "lastStage": (
+                        progress.get(
+                            "stage"
+                        )
+                    ),
+                    "lastStageLabel": (
+                        progress.get(
+                            "stageLabel"
+                        )
+                    ),
+                }
+            )
+
+        return {
+            "count": len(
+                items
+            ),
+            "items": items,
+        }
 
     def get_status(
         self,

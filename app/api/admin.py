@@ -4,6 +4,9 @@ from sqlalchemy.orm import Session
 import asyncio
 import time
 from datetime import date, timedelta
+from app.api.admin_operation_guard import (
+    ensure_daily_pipeline_not_running,
+)
 from app.core.database import get_db
 from app.core.exceptions import ConfigurationError, ExternalApiError
 from app.schemas.stock import StockResponse, SyncResponse
@@ -57,6 +60,11 @@ from app.services.disclosure_feature_service import (
 router = APIRouter(
     prefix="/admin/sync",
     tags=["admin-sync"],
+    dependencies=[
+        Depends(
+            ensure_daily_pipeline_not_running
+        ),
+    ],
 )
 
 
