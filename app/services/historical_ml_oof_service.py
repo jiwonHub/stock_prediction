@@ -127,6 +127,160 @@ class HistoricalMlOofService:
             **params,
         )
 
+    @classmethod
+    def _make_ranker(
+        cls,
+        *,
+        objective: str,
+        classifier_params: dict | None = None,
+    ):
+        try:
+            from xgboost import (
+                XGBRanker,
+            )
+
+        except ImportError as e:
+            raise RuntimeError(
+                "xgboost가 설치되어 있지 않습니다."
+            ) from e
+
+        params = dict(
+            cls.FINAL_PARAMS
+        )
+
+        if classifier_params:
+            params.update(
+                classifier_params
+            )
+
+        return XGBRanker(
+            objective=objective,
+            eval_metric="ndcg@10",
+            tree_method="hist",
+            lambdarank_pair_method="topk",
+            lambdarank_num_pair_per_sample=12,
+            random_state=(
+                cls.RANDOM_STATE
+            ),
+            n_jobs=4,
+            **params,
+        )
+
+    @staticmethod
+    def _build_ranking_qid(
+        feature_dates: list,
+    ) -> np.ndarray:
+        date_to_qid = {}
+
+        qid = np.empty(
+            len(
+                feature_dates
+            ),
+            dtype=np.int32,
+        )
+
+        next_qid = 0
+
+        for index, feature_date in enumerate(
+            feature_dates
+        ):
+            if feature_date not in date_to_qid:
+                date_to_qid[
+                    feature_date
+                ] = next_qid
+
+                next_qid += 1
+
+            qid[index] = date_to_qid[
+                feature_date
+            ]
+
+        return qid
+
+    @staticmethod
+    def _build_ranking_labels(
+        *,
+        future_returns: np.ndarray,
+        feature_dates: list,
+        label_mode: str,
+    ) -> np.ndarray:
+        if label_mode == "binary":
+            return (
+                future_returns
+                > 0.0
+            ).astype(
+                np.int32
+            )
+
+        if label_mode != "quintile":
+            raise ValueError(
+                "지원하지 않는 Ranking label mode: "
+                f"{label_mode}"
+            )
+
+        labels = np.zeros(
+            len(
+                future_returns
+            ),
+            dtype=np.int32,
+        )
+
+        grouped_indexes = {}
+
+        for index, feature_date in enumerate(
+            feature_dates
+        ):
+            grouped_indexes.setdefault(
+                feature_date,
+                [],
+            ).append(
+                index
+            )
+
+        for indexes in grouped_indexes.values():
+            row_indexes = np.asarray(
+                indexes,
+                dtype=np.int64,
+            )
+
+            if len(
+                row_indexes
+            ) <= 1:
+                continue
+
+            daily_returns = future_returns[
+                row_indexes
+            ]
+
+            ranks = rankdata(
+                daily_returns,
+                method="average",
+            )
+
+            percentile = (
+                ranks - 1.0
+            ) / float(
+                len(
+                    row_indexes
+                ) - 1
+            )
+
+            relevance = np.minimum(
+                np.floor(
+                    percentile
+                    * 5.0
+                ),
+                4.0,
+            ).astype(
+                np.int32
+            )
+
+            labels[
+                row_indexes
+            ] = relevance
+
+        return labels
+
     @staticmethod
     def _threshold_metrics(
         *,
@@ -3043,7 +3197,45 @@ class HistoricalMlOofService:
         excluded_features: set[str] | None = None,
         comparison_only: bool = False,
         classifier_params: dict | None = None,
+        model_mode: str = "classifier",
+        ranking_objective: str = "rank:pairwise",
+        ranking_label_mode: str = "binary",
     ) -> dict:
+        if model_mode not in {
+            "classifier",
+            "ranker",
+        }:
+            raise ValueError(
+                "지원하지 않는 model_mode: "
+                f"{model_mode}"
+            )
+
+        if (
+            model_mode == "ranker"
+            and ranking_objective
+            not in {
+                "rank:pairwise",
+                "rank:ndcg",
+            }
+        ):
+            raise ValueError(
+                "지원하지 않는 Ranking objective: "
+                f"{ranking_objective}"
+            )
+
+        if (
+            model_mode == "ranker"
+            and ranking_label_mode
+            not in {
+                "binary",
+                "quintile",
+            }
+        ):
+            raise ValueError(
+                "지원하지 않는 Ranking label mode: "
+                f"{ranking_label_mode}"
+            )
+
         dataset = (
             self.dataset_service
             .build_dataset(
@@ -3288,44 +3480,120 @@ class HistoricalMlOofService:
                 np.int32
             )
 
-            classifier = (
-                self._make_classifier(
-                    classifier_params=(
-                        classifier_params
-                    ),
+            train_feature_dates = [
+                dataset.feature_dates[
+                    index
+                ]
+                for index
+                in train_indexes
+            ]
+
+            if model_mode == "ranker":
+                ranker = (
+                    self._make_ranker(
+                        objective=(
+                            ranking_objective
+                        ),
+                        classifier_params=(
+                            classifier_params
+                        ),
+                    )
                 )
-            )
 
-            classifier.fit(
-                x_train,
-                y_train,
-            )
-
-            probability = (
-                classifier
-                .predict_proba(
-                    x_validation
-                )[:, 1]
-            )
-
-            auc = float(
-                roc_auc_score(
-                    y_validation,
-                    probability,
+                ranking_labels = (
+                    self._build_ranking_labels(
+                        future_returns=(
+                            y_all[
+                                train_indexes
+                            ]
+                        ),
+                        feature_dates=(
+                            train_feature_dates
+                        ),
+                        label_mode=(
+                            ranking_label_mode
+                        ),
+                    )
                 )
-            )
 
-            raw_probability_metrics = (
-                self.calibration_service
-                ._metrics(
-                    y_true=(
-                        y_validation
-                    ),
-                    probability=(
-                        probability
-                    ),
+                train_qid = (
+                    self._build_ranking_qid(
+                        train_feature_dates
+                    )
                 )
-            )
+
+                ranker.fit(
+                    x_train,
+                    ranking_labels,
+                    qid=train_qid,
+                )
+
+                probability = np.asarray(
+                    ranker.predict(
+                        x_validation
+                    ),
+                    dtype=np.float64,
+                )
+
+                auc = float(
+                    roc_auc_score(
+                        y_validation,
+                        probability,
+                    )
+                )
+
+                raw_probability_metrics = {
+                    "log_loss": None,
+                    "brier_score": None,
+                    "ece_10": None,
+                    "probability_mean": None,
+                    "actual_positive_rate":
+                        float(
+                            np.mean(
+                                y_validation
+                            )
+                        ),
+                }
+
+            else:
+                classifier = (
+                    self._make_classifier(
+                        classifier_params=(
+                            classifier_params
+                        ),
+                    )
+                )
+
+                classifier.fit(
+                    x_train,
+                    y_train,
+                )
+
+                probability = (
+                    classifier
+                    .predict_proba(
+                        x_validation
+                    )[:, 1]
+                )
+
+                auc = float(
+                    roc_auc_score(
+                        y_validation,
+                        probability,
+                    )
+                )
+
+                raw_probability_metrics = (
+                    self.calibration_service
+                    ._metrics(
+                        y_true=(
+                            y_validation
+                        ),
+                        probability=(
+                            probability
+                        ),
+                    )
+                )
 
             all_probabilities.append(
                 probability
@@ -3456,17 +3724,31 @@ class HistoricalMlOofService:
         )
 
         if comparison_only:
-            comparison_probability_metrics = (
-                self.calibration_service
-                ._metrics(
-                    y_true=(
-                        oof_y
-                    ),
-                    probability=(
-                        oof_probability
-                    ),
+            if model_mode == "ranker":
+                comparison_probability_metrics = {
+                    "roc_auc":
+                        float(
+                            roc_auc_score(
+                                oof_y,
+                                oof_probability,
+                            )
+                        ),
+                    "log_loss": None,
+                    "brier_score": None,
+                    "ece_10": None,
+                }
+            else:
+                comparison_probability_metrics = (
+                    self.calibration_service
+                    ._metrics(
+                        y_true=(
+                            oof_y
+                        ),
+                        probability=(
+                            oof_probability
+                        ),
+                    )
                 )
-            )
 
             top10_cost20 = next(
                 scenario
@@ -3542,6 +3824,37 @@ class HistoricalMlOofService:
                         else dict(
                             self.FINAL_PARAMS
                         )
+                    ),
+
+                "model_mode":
+                    model_mode,
+
+                "objective":
+                    (
+                        ranking_objective
+                        if model_mode == "ranker"
+                        else "binary:logistic"
+                    ),
+
+                "ranking_label_mode":
+                    (
+                        ranking_label_mode
+                        if model_mode == "ranker"
+                        else None
+                    ),
+
+                "ranking_pair_method":
+                    (
+                        "topk"
+                        if model_mode == "ranker"
+                        else None
+                    ),
+
+                "ranking_num_pair_per_sample":
+                    (
+                        12
+                        if model_mode == "ranker"
+                        else None
                     ),
 
                 "fold_count":

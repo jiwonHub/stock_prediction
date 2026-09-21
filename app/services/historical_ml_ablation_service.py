@@ -913,6 +913,138 @@ class HistoricalMlAblationService:
                 harmful_features,
         }
 
+    def run_oof_objective_experiment(
+        self,
+        *,
+        feature_version: str,
+        experiment: str,
+        horizon: int = 5,
+        folds: int = 4,
+        initial_train_ratio: float = 0.55,
+    ) -> dict:
+        experiments = {
+            "binary_logistic_26": {
+                "model_mode":
+                    "classifier",
+                "ranking_objective":
+                    "rank:pairwise",
+                "ranking_label_mode":
+                    "binary",
+            },
+
+            "rank_pairwise_binary_26": {
+                "model_mode":
+                    "ranker",
+                "ranking_objective":
+                    "rank:pairwise",
+                "ranking_label_mode":
+                    "binary",
+            },
+
+            "rank_pairwise_quintile_26": {
+                "model_mode":
+                    "ranker",
+                "ranking_objective":
+                    "rank:pairwise",
+                "ranking_label_mode":
+                    "quintile",
+            },
+
+            "rank_ndcg_binary_26": {
+                "model_mode":
+                    "ranker",
+                "ranking_objective":
+                    "rank:ndcg",
+                "ranking_label_mode":
+                    "binary",
+            },
+
+            "rank_ndcg_quintile_26": {
+                "model_mode":
+                    "ranker",
+                "ranking_objective":
+                    "rank:ndcg",
+                "ranking_label_mode":
+                    "quintile",
+            },
+        }
+
+        if experiment not in experiments:
+            raise ValueError(
+                "지원하지 않는 Objective 실험: "
+                f"{experiment}"
+            )
+
+        config = experiments[
+            experiment
+        ]
+
+        result = (
+            HistoricalMlOofService(
+                self.db
+            )
+            .run(
+                feature_version=(
+                    feature_version
+                ),
+                horizon=horizon,
+                folds=folds,
+                initial_train_ratio=(
+                    initial_train_ratio
+                ),
+                excluded_features={
+                    "rsi_14",
+                },
+                comparison_only=True,
+                classifier_params=(
+                    dict(
+                        HistoricalMlOofService
+                        .FINAL_PARAMS
+                    )
+                ),
+                model_mode=(
+                    config[
+                        "model_mode"
+                    ]
+                ),
+                ranking_objective=(
+                    config[
+                        "ranking_objective"
+                    ]
+                ),
+                ranking_label_mode=(
+                    config[
+                        "ranking_label_mode"
+                    ]
+                ),
+            )
+        )
+
+        return {
+            "status":
+                "pass",
+
+            "phase":
+                "6.3-4",
+
+            "experiment":
+                experiment,
+
+            "removed_features": [
+                "rsi_14",
+            ],
+
+            "comparison_rule":
+                (
+                    "rsi_14를 제외한 26개 Feature, "
+                    "기존 FINAL_PARAMS, 동일 OOF 구간을 "
+                    "고정하고 학습 objective와 "
+                    "ranking relevance label만 비교"
+                ),
+
+            **result,
+        }
+
     def run_oof_model_tuning_experiment(
         self,
         *,
