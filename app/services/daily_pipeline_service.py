@@ -1057,12 +1057,36 @@ class DailyPipelineService:
 
                     return result
 
+                self._update_run_progress(
+                    run_id,
+                    stage="toss_market_context",
+                    current=0,
+                    total=1,
+                    force=True,
+                )
+
                 (
                     toss_market_context,
                     toss_market_context_failures,
                 ) = await (
                     self
                     ._sync_toss_global_market_context()
+                )
+
+                self._update_run_progress(
+                    run_id,
+                    stage="toss_market_context",
+                    current=1,
+                    total=1,
+                    force=True,
+                )
+
+                self._update_run_progress(
+                    run_id,
+                    stage="market_context",
+                    current=0,
+                    total=1,
+                    force=True,
                 )
 
                 (
@@ -1080,6 +1104,22 @@ class DailyPipelineService:
                     )
                 )
 
+                self._update_run_progress(
+                    run_id,
+                    stage="market_context",
+                    current=1,
+                    total=1,
+                    force=True,
+                )
+
+                self._update_run_progress(
+                    run_id,
+                    stage="valuation_benchmarks",
+                    current=0,
+                    total=1,
+                    force=True,
+                )
+
                 (
                     valuation_benchmark_rows,
                     valuation_sector_count,
@@ -1093,6 +1133,22 @@ class DailyPipelineService:
                     )
                 )
 
+                self._update_run_progress(
+                    run_id,
+                    stage="valuation_benchmarks",
+                    current=1,
+                    total=1,
+                    force=True,
+                )
+
+                self._update_run_progress(
+                    run_id,
+                    stage="universe",
+                    current=0,
+                    total=1,
+                    force=True,
+                )
+
                 universe = (
                     self.market_data_service
                     .get_current_universe_stock_codes(
@@ -1100,6 +1156,14 @@ class DailyPipelineService:
                             self.UNIVERSE_LIMIT
                         )
                     )
+                )
+
+                self._update_run_progress(
+                    run_id,
+                    stage="universe",
+                    current=1,
+                    total=1,
+                    force=True,
                 )
 
                 if not universe:
@@ -1133,7 +1197,23 @@ class DailyPipelineService:
 
                 # 일봉이 들어온 뒤
                 # 기존 추천 성과를 먼저 평가합니다.
+                self._update_run_progress(
+                    run_id,
+                    stage="evaluate_performance",
+                    current=0,
+                    total=1,
+                    force=True,
+                )
+
                 self.market_context_service.evaluate_performance()
+
+                self._update_run_progress(
+                    run_id,
+                    stage="evaluate_performance",
+                    current=1,
+                    total=1,
+                    force=True,
+                )
 
                 market_date = (
                     self._latest_trade_date(
@@ -1193,6 +1273,14 @@ class DailyPipelineService:
 
                     return result
 
+                self._update_run_progress(
+                    run_id,
+                    stage="current_prices",
+                    current=0,
+                    total=1,
+                    force=True,
+                )
+
                 (
                     current_price_success,
                     current_price_failures,
@@ -1203,8 +1291,24 @@ class DailyPipelineService:
                     )
                 )
 
+                self._update_run_progress(
+                    run_id,
+                    stage="current_prices",
+                    current=1,
+                    total=1,
+                    force=True,
+                )
+
                 disclosure_rows = 0
                 disclosure_failures = 0
+
+                self._update_run_progress(
+                    run_id,
+                    stage="global_disclosures",
+                    current=0,
+                    total=1,
+                    force=True,
+                )
 
                 try:
                     disclosure_rows = await (
@@ -1226,8 +1330,24 @@ class DailyPipelineService:
                         flush=True,
                     )
 
+                self._update_run_progress(
+                    run_id,
+                    stage="global_disclosures",
+                    current=1,
+                    total=1,
+                    force=True,
+                )
+
                 global_news_rows = 0
                 global_news_failures = 0
+
+                self._update_run_progress(
+                    run_id,
+                    stage="global_news",
+                    current=0,
+                    total=1,
+                    force=True,
+                )
 
                 try:
                     global_news_rows = await (
@@ -1248,6 +1368,14 @@ class DailyPipelineService:
                         f"{e}",
                         flush=True,
                     )
+
+                self._update_run_progress(
+                    run_id,
+                    stage="global_news",
+                    current=1,
+                    total=1,
+                    force=True,
+                )
 
                 business_year = str(
                     today.year - 1
