@@ -1500,9 +1500,11 @@ class DailyPipelineService:
                     + price_failures
                     + current_price_failures
                     + disclosure_failures
+                    + top_disclosure_failures
                     + global_news_failures
                     + top_news_failures
                     + financial_failures
+                    + analysis_snapshot_failures
                 )
 
                 result = {
@@ -1639,9 +1641,11 @@ class DailyPipelineService:
                     "disclosures": {
                         "saved": (
                             disclosure_rows
+                            + top_disclosure_rows
                         ),
                         "failures": (
                             disclosure_failures
+                            + top_disclosure_failures
                         ),
                     },
                     "financials": {
@@ -1653,6 +1657,14 @@ class DailyPipelineService:
                         ),
                         "failed": (
                             financial_failures
+                        ),
+                    },
+                    "analysisSnapshots": {
+                        "success": (
+                            analysis_snapshot_success
+                        ),
+                        "failed": (
+                            analysis_snapshot_failures
                         ),
                     },
                 }
@@ -1932,6 +1944,9 @@ class DailyPipelineService:
                 is not None
                 and latest_snapshot.as_of_date
                 == today
+                and self._daily_refresh_completed(
+                    today
+                )
             ),
             "latestMarketDate": (
                 latest_market_date.isoformat()
