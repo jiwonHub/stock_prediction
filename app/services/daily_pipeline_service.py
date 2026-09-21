@@ -1994,15 +1994,34 @@ class DailyPipelineService:
                     )
                 )
 
+                failed_at = (
+                    datetime.utcnow()
+                )
+
                 failure_metadata = {
                     "date": (
                         today.isoformat()
+                    ),
+                    "failedAt": (
+                        failed_at.isoformat()
                     ),
                     "exceptionType": (
                         type(
                             e
                         ).__name__
                     ),
+                    "error": {
+                        "type": (
+                            type(
+                                e
+                            ).__name__
+                        ),
+                        "message": (
+                            str(
+                                e
+                            )
+                        ),
+                    },
                 }
 
                 if failed_progress:
