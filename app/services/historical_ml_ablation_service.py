@@ -20,6 +20,9 @@ from app.services.historical_ml_oof_service import (
 from app.services.historical_ml_walk_forward_service import (
     HistoricalMlWalkForwardService,
 )
+from app.services.historical_ml_walk_forward_tuning_service import (
+    HistoricalMlWalkForwardTuningService,
+)
 
 
 class HistoricalMlAblationService:
@@ -908,6 +911,130 @@ class HistoricalMlAblationService:
 
             "harmful_feature_candidates":
                 harmful_features,
+        }
+
+    def run_oof_model_tuning_experiment(
+        self,
+        *,
+        feature_version: str,
+        experiment: str,
+        horizon: int = 5,
+        folds: int = 4,
+        initial_train_ratio: float = 0.55,
+    ) -> dict:
+        candidate_params = {
+            candidate[
+                "name"
+            ]: {
+                key:
+                    value
+                for (
+                    key,
+                    value,
+                )
+                in candidate.items()
+                if key != "name"
+            }
+            for candidate
+            in (
+                HistoricalMlWalkForwardTuningService
+                ._candidate_params()
+            )
+        }
+
+        experiments = {
+            "current_final_26":
+                dict(
+                    HistoricalMlOofService
+                    .FINAL_PARAMS
+                ),
+
+            "shallow_regularized_26":
+                candidate_params[
+                    "shallow_regularized"
+                ],
+
+            "strong_regularization_26":
+                candidate_params[
+                    "strong_regularization"
+                ],
+
+            "very_shallow_26":
+                candidate_params[
+                    "very_shallow"
+                ],
+
+            "very_shallow_strong_26":
+                candidate_params[
+                    "very_shallow_strong"
+                ],
+
+            "shallow_slow_26":
+                candidate_params[
+                    "shallow_slow"
+                ],
+        }
+
+        if experiment not in experiments:
+            raise ValueError(
+                "지원하지 않는 Model tuning 실험: "
+                f"{experiment}"
+            )
+
+        classifier_params = dict(
+            experiments[
+                experiment
+            ]
+        )
+
+        result = (
+            HistoricalMlOofService(
+                self.db
+            )
+            .run(
+                feature_version=(
+                    feature_version
+                ),
+                horizon=horizon,
+                folds=folds,
+                initial_train_ratio=(
+                    initial_train_ratio
+                ),
+                excluded_features={
+                    "rsi_14",
+                },
+                comparison_only=True,
+                classifier_params=(
+                    classifier_params
+                ),
+            )
+        )
+
+        return {
+            "status":
+                "pass",
+
+            "phase":
+                "6.3-3",
+
+            "experiment":
+                experiment,
+
+            "removed_features": [
+                "rsi_14",
+            ],
+
+            "classifier_params":
+                classifier_params,
+
+            "comparison_rule":
+                (
+                    "rsi_14를 제외한 26개 Feature와 "
+                    "동일 OOF 구간을 고정하고 "
+                    "XGBoost 파라미터만 변경하여 재학습"
+                ),
+
+            **result,
         }
 
     def run_oof_feature_subset_experiment(

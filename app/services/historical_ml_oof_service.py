@@ -95,6 +95,7 @@ class HistoricalMlOofService:
     @classmethod
     def _make_classifier(
         cls,
+        classifier_params: dict | None = None,
     ):
         try:
             from xgboost import (
@@ -106,6 +107,15 @@ class HistoricalMlOofService:
                 "xgboost가 설치되어 있지 않습니다."
             ) from e
 
+        params = dict(
+            cls.FINAL_PARAMS
+        )
+
+        if classifier_params:
+            params.update(
+                classifier_params
+            )
+
         return XGBClassifier(
             objective="binary:logistic",
             eval_metric="logloss",
@@ -114,7 +124,7 @@ class HistoricalMlOofService:
                 cls.RANDOM_STATE
             ),
             n_jobs=4,
-            **cls.FINAL_PARAMS,
+            **params,
         )
 
     @staticmethod
@@ -3032,6 +3042,7 @@ class HistoricalMlOofService:
         initial_train_ratio: float = 0.55,
         excluded_features: set[str] | None = None,
         comparison_only: bool = False,
+        classifier_params: dict | None = None,
     ) -> dict:
         dataset = (
             self.dataset_service
@@ -3278,7 +3289,11 @@ class HistoricalMlOofService:
             )
 
             classifier = (
-                self._make_classifier()
+                self._make_classifier(
+                    classifier_params=(
+                        classifier_params
+                    ),
+                )
             )
 
             classifier.fit(
@@ -3516,6 +3531,17 @@ class HistoricalMlOofService:
                 "excluded_features":
                     sorted(
                         excluded_feature_set
+                    ),
+
+                "classifier_params":
+                    (
+                        dict(
+                            classifier_params
+                        )
+                        if classifier_params
+                        else dict(
+                            self.FINAL_PARAMS
+                        )
                     ),
 
                 "fold_count":
