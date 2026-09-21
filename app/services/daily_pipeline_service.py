@@ -2009,7 +2009,11 @@ class DailyPipelineService:
                 ).get(
                     "progress"
                 )
-                if latest_run
+                if (
+                    latest_run
+                    and latest_run.status
+                    == "running"
+                )
                 else None
             ),
             "latestRun": (
