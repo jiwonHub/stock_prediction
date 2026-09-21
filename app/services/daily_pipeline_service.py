@@ -1128,6 +1128,7 @@ class DailyPipelineService:
                         "status": (
                             "already_completed"
                         ),
+                        "refreshCompleted": True,
                         "date": (
                             today.isoformat()
                         ),
