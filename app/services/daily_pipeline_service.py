@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import asyncio
+from functools import wraps
 from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
 from sqlalchemy.orm import Session
 
+from app.core.database import engine
 from app.models.future import (
     DataSyncRun,
     RankingItem,
@@ -29,6 +31,108 @@ from app.services.stock_analysis_service import (
 from app.services.stock_service import (
     StockService,
 )
+
+
+_DAILY_PIPELINE_ADVISORY_LOCK_KEY = 2026092101
+
+
+def _with_daily_pipeline_advisory_lock(
+    method,
+):
+    @wraps(method)
+    async def wrapper(
+        self,
+        *args,
+        **kwargs,
+    ):
+        if (
+            engine.dialect.name
+            != "postgresql"
+        ):
+            return await method(
+                self,
+                *args,
+                **kwargs,
+            )
+
+        connection = (
+            engine.connect()
+        )
+
+        acquired = False
+
+        try:
+            acquired = bool(
+                connection.scalar(
+                    text(
+                        """
+                        SELECT pg_try_advisory_lock(
+                            :lock_key
+                        )
+                        """
+                    ),
+                    {
+                        "lock_key": (
+                            _DAILY_PIPELINE_ADVISORY_LOCK_KEY
+                        ),
+                    },
+                )
+            )
+
+            # session-level advisory lock은
+            # commit 후에도 유지됩니다.
+            # 장시간 idle transaction 방지용입니다.
+            connection.commit()
+
+            if not acquired:
+                return {
+                    "status": (
+                        "already_running"
+                    ),
+                    "message": (
+                        "다른 프로세스에서 "
+                        "일일 자동화가 "
+                        "이미 실행 중입니다."
+                    ),
+                }
+
+            return await method(
+                self,
+                *args,
+                **kwargs,
+            )
+
+        finally:
+            if acquired:
+                try:
+                    connection.scalar(
+                        text(
+                            """
+                            SELECT pg_advisory_unlock(
+                                :lock_key
+                            )
+                            """
+                        ),
+                        {
+                            "lock_key": (
+                                _DAILY_PIPELINE_ADVISORY_LOCK_KEY
+                            ),
+                        },
+                    )
+
+                    connection.commit()
+
+                except Exception as e:
+                    print(
+                        "[DAILY][ADVISORY-LOCK] "
+                        "unlock failed: "
+                        f"{type(e).__name__}: {e}",
+                        flush=True,
+                    )
+
+            connection.close()
+
+    return wrapper
 
 
 class DailyPipelineService:
@@ -682,6 +786,7 @@ class DailyPipelineService:
             failed,
         )
 
+    @_with_daily_pipeline_advisory_lock
     async def run(
         self,
         *,
