@@ -332,8 +332,12 @@ class DailyPipelineService:
         if run is None:
             return
 
-        run.finished_at = (
+        finished_at = (
             datetime.utcnow()
+        )
+
+        run.finished_at = (
+            finished_at
         )
 
         run.status = status
@@ -363,6 +367,19 @@ class DailyPipelineService:
             merged_metadata.update(
                 metadata
             )
+
+        merged_metadata[
+            "durationSeconds"
+        ] = round(
+            max(
+                (
+                    finished_at
+                    - run.started_at
+                ).total_seconds(),
+                0.0,
+            ),
+            1,
+        )
 
         run.metadata_json = (
             merged_metadata
