@@ -138,14 +138,8 @@ def _with_daily_pipeline_advisory_lock(
 class DailyPipelineService:
     KST = ZoneInfo("Asia/Seoul")
 
-    # 종합랭킹 최종 노출 개수
     RANKING_LIMIT = 100
-
-    # CompositeRankingService가 최소 500종목을
-    # 평가하므로 수급/밸류/가격/재무 데이터도
-    # 동일 후보군까지 갱신합니다.
     UNIVERSE_LIMIT = 500
-
     TOP_CONTEXT_LIMIT = 100
 
     DAILY_RUN_HOUR = 16
@@ -154,6 +148,30 @@ class DailyPipelineService:
     RECENT_PRICE_DAYS = 14
     BOOTSTRAP_PRICE_DAYS = 1200
     MIN_HISTORY_ROWS = 61
+
+    PROGRESS_STAGE_LABELS = {
+        "toss_market_context": "글로벌 시장 데이터 수집",
+        "market_context": "종목 시장 데이터 수집",
+        "valuation_benchmarks": "밸류에이션 벤치마크 계산",
+        "universe": "분석 대상 종목 구성",
+        "trading_signals": "기술적 지표 계산",
+        "daily_prices": "일봉 데이터 수집",
+        "evaluate_performance": "기존 추천 성과 평가",
+        "current_prices_toss": "현재가 수집",
+        "current_prices_fallback": "현재가 보완 수집",
+        "current_prices": "현재가 수집 완료",
+        "global_disclosures": "전체 공시 수집",
+        "global_news": "전체 뉴스 수집",
+        "financials": "재무 데이터 수집",
+        "ranking": "종목 랭킹 계산",
+        "top_context": "상위 종목 컨텍스트 수집",
+        "top_news": "상위 종목 뉴스 수집",
+        "top_disclosures": "상위 종목 공시 수집",
+        "ranking_snapshot": "랭킹 스냅샷 저장",
+        "analysis_snapshots": "분석 스냅샷 생성",
+        "final_performance_evaluation": "최종 성과 평가",
+        "finalizing": "자동화 완료 처리",
+    }
 
     _run_lock = asyncio.Lock()
 
@@ -403,6 +421,12 @@ class DailyPipelineService:
                 "progress"
             ] = {
                 "stage": stage,
+                "stageLabel": (
+                    self.PROGRESS_STAGE_LABELS.get(
+                        stage,
+                        stage,
+                    )
+                ),
                 "current": current,
                 "total": total,
                 "percent": percent,
