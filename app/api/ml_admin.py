@@ -21,6 +21,9 @@ from app.services.historical_ml_ablation_service import (
 from app.services.composite_ranking_service import (
     CompositeRankingService,
 )
+from app.services.ml_ranking_inference_service import (
+    MlRankingInferenceService,
+)
 
 router = APIRouter(
     prefix="/admin/ml",
@@ -65,6 +68,171 @@ def refit_historical_final_model(
             status_code=400,
             detail=str(e),
         ) from e
+
+
+@router.get(
+    "/historical/final-model/inference-smoke",
+)
+def smoke_test_final_model_inference(
+    limit: int = Query(
+        default=100,
+        ge=10,
+        le=100,
+    ),
+    db: Session = Depends(
+        get_db
+    ),
+):
+    try:
+        service = (
+            MlRankingInferenceService(
+                db
+            )
+        )
+
+        result = (
+            service
+            .score_current_universe(
+                limit=limit,
+                include_explanations=False,
+            )
+        )
+
+    except (
+        FileNotFoundError,
+        RuntimeError,
+        ValueError,
+    ) as e:
+        raise HTTPException(
+            status_code=400,
+            detail=str(e),
+        ) from e
+
+    scores = result[
+        "scores"
+    ]
+
+    top10 = [
+        {
+            "ml_rank":
+                row[
+                    "ml_rank"
+                ],
+
+            "stock_code":
+                row[
+                    "stock_code"
+                ],
+
+            "stock_name":
+                row[
+                    "stock_name"
+                ],
+
+            "feature_date":
+                row[
+                    "feature_date"
+                ].isoformat(),
+
+            "raw_probability_pct":
+                row[
+                    "raw_probability_pct"
+                ],
+
+            "ml_score":
+                row[
+                    "ml_score"
+                ],
+        }
+        for row
+        in scores[:10]
+    ]
+
+    return {
+        "status":
+            "pass",
+
+        "phase":
+            "7.2",
+
+        "model_name":
+            result[
+                "model_name"
+            ],
+
+        "model_version":
+            result[
+                "model_version"
+            ],
+
+        "refit_version":
+            service.artifact.get(
+                "refit_version"
+            ),
+
+        "artifact_created_at":
+            service.artifact.get(
+                "created_at"
+            ),
+
+        "feature_count":
+            result[
+                "feature_count"
+            ],
+
+        "final_selection":
+            service.artifact.get(
+                "final_selection"
+            ),
+
+        "requested_universe":
+            result[
+                "requested_universe"
+            ],
+
+        "scored_count":
+            result[
+                "scored_count"
+            ],
+
+        "skipped_count":
+            result[
+                "skipped_count"
+            ],
+
+        "feature_date_min":
+            result[
+                "feature_date_min"
+            ],
+
+        "feature_date_max":
+            result[
+                "feature_date_max"
+            ],
+
+        "raw_probability_min_pct":
+            result[
+                "raw_probability_min_pct"
+            ],
+
+        "raw_probability_mean_pct":
+            result[
+                "raw_probability_mean_pct"
+            ],
+
+        "raw_probability_max_pct":
+            result[
+                "raw_probability_max_pct"
+            ],
+
+        "top10":
+            top10,
+
+        "skipped":
+            result[
+                "skipped"
+            ],
+    }
 
 
 @router.get(

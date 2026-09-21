@@ -77,6 +77,94 @@ class MlRankingInferenceService:
     ) -> None:
         if (
             self.artifact.get(
+                "refit_version"
+            )
+            != HistoricalMlFinalModelService
+            .REFIT_VERSION
+        ):
+            raise RuntimeError(
+                "ML Ranking Refit 버전이 "
+                "일치하지 않습니다: "
+                f"{self.artifact.get('refit_version')}"
+            )
+
+        final_selection = (
+            self.artifact.get(
+                "final_selection"
+            )
+            or {}
+        )
+
+        if (
+            final_selection.get(
+                "decision"
+            )
+            != "keep_production_baseline_27"
+            or final_selection.get(
+                "feature_count"
+            ) != 27
+            or final_selection.get(
+                "required_feature"
+            ) != "rsi_14"
+            or final_selection.get(
+                "ml_weight"
+            ) != 0.05
+            or final_selection.get(
+                "locked_test_consumed"
+            ) is not True
+        ):
+            raise RuntimeError(
+                "ML Ranking Final Selection "
+                "메타데이터가 Phase 7 기준과 "
+                "일치하지 않습니다."
+            )
+
+        if (
+            self.artifact.get(
+                "refit_version"
+            )
+            != HistoricalMlFinalModelService
+            .REFIT_VERSION
+        ):
+            raise RuntimeError(
+                "ML Ranking Refit 버전이 "
+                "일치하지 않습니다: "
+                f"{self.artifact.get('refit_version')}"
+            )
+
+        final_selection = (
+            self.artifact.get(
+                "final_selection"
+            )
+            or {}
+        )
+
+        if (
+            final_selection.get(
+                "decision"
+            )
+            != "keep_production_baseline_27"
+            or final_selection.get(
+                "feature_count"
+            ) != 27
+            or final_selection.get(
+                "required_feature"
+            ) != "rsi_14"
+            or final_selection.get(
+                "ml_weight"
+            ) != 0.05
+            or final_selection.get(
+                "locked_test_consumed"
+            ) is not True
+        ):
+            raise RuntimeError(
+                "ML Ranking Final Selection "
+                "메타데이터가 Phase 7 기준과 "
+                "일치하지 않습니다."
+            )
+
+        if (
+            self.artifact.get(
                 "model_name"
             )
             != HistoricalMlFinalModelService
