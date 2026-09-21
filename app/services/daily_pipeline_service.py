@@ -1100,7 +1100,22 @@ class DailyPipelineService:
                     .sync_ranked_stock_context(
                         limit=(
                             self.UNIVERSE_LIMIT
-                        )
+                        ),
+                        progress_callback=(
+                            lambda (
+                                current,
+                                total,
+                                stock_code,
+                            ): (
+                                self._update_run_progress(
+                                    run_id,
+                                    stage="market_context",
+                                    current=current,
+                                    total=total,
+                                    stock_code=stock_code,
+                                )
+                            )
+                        ),
                     )
                 )
 

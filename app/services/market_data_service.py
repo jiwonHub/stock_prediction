@@ -1,4 +1,5 @@
 from collections import defaultdict
+from collections.abc import Callable
 from datetime import date, datetime, timedelta
 from statistics import median
 
@@ -1574,6 +1575,17 @@ class MarketDataService:
             self,
             *,
             limit: int = 100,
+            progress_callback: (
+                Callable[
+                    [
+                        int,
+                        int,
+                        str | None,
+                    ],
+                    None,
+                ]
+                | None
+            ) = None,
         ) -> tuple[
             int,
             int,
@@ -1730,6 +1742,13 @@ class MarketDataService:
 
             total = len(universe)
 
+            if progress_callback is not None:
+                progress_callback(
+                    0,
+                    total,
+                    None,
+                )
+
             for (
                 index,
                 (
@@ -1854,6 +1873,13 @@ class MarketDataService:
                     and valuation_ok
                 ):
                     success_stocks += 1
+
+                if progress_callback is not None:
+                    progress_callback(
+                        index,
+                        total,
+                        stock_code,
+                    )
 
             return (
                 success_stocks,
