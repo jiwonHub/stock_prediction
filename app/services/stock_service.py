@@ -1555,6 +1555,12 @@ class StockService:
                 MarketContextService,
             )
 
+            snapshot_load_limit = max(
+                limit,
+                MarketContextService
+                .MIN_SNAPSHOT_RANKS,
+            )
+
             (
                 snapshot,
                 snapshot_items,
@@ -1570,7 +1576,9 @@ class StockService:
                         .PRIMARY_HORIZON_DAYS
                     ),
                     universe="KRX",
-                    limit=limit,
+                    limit=(
+                        snapshot_load_limit
+                    ),
                 )
             )
 
