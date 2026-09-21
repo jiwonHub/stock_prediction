@@ -8,7 +8,7 @@ from zoneinfo import ZoneInfo
 from sqlalchemy import func, select, text
 from sqlalchemy.orm import Session
 
-from app.core.database import engine
+from app.core.database import SessionLocal, engine
 from app.models.future import (
     DataSyncRun,
     RankingItem,
@@ -352,6 +352,86 @@ class DailyPipelineService:
 
         self.db.commit()
 
+    def _update_run_progress(
+        self,
+        run_id: int,
+        *,
+        stage: str,
+        current: int,
+        total: int,
+        stock_code: str | None = None,
+        force: bool = False,
+    ) -> None:
+        if (
+            not force
+            and current not in (0, total)
+            and current % 10 != 0
+        ):
+            return
+
+        progress_db = SessionLocal()
+
+        try:
+            run = progress_db.get(
+                DataSyncRun,
+                run_id,
+            )
+
+            if (
+                run is None
+                or run.status != "running"
+            ):
+                return
+
+            metadata = dict(
+                run.metadata_json
+                or {}
+            )
+
+            percent = (
+                round(
+                    current
+                    / total
+                    * 100.0,
+                    1,
+                )
+                if total > 0
+                else 0.0
+            )
+
+            metadata[
+                "progress"
+            ] = {
+                "stage": stage,
+                "current": current,
+                "total": total,
+                "percent": percent,
+                "stockCode": stock_code,
+                "updatedAt": (
+                    datetime.utcnow()
+                    .isoformat()
+                ),
+            }
+
+            run.metadata_json = (
+                metadata
+            )
+
+            progress_db.commit()
+
+        except Exception as e:
+            progress_db.rollback()
+
+            print(
+                "[DAILY][PROGRESS] "
+                f"update failed: "
+                f"{type(e).__name__}: {e}",
+                flush=True,
+            )
+
+        finally:
+            progress_db.close()
+
     def _recover_stale_runs(
         self,
     ) -> int:
@@ -530,6 +610,8 @@ class DailyPipelineService:
     async def _sync_trading_signals(
         self,
         stock_codes: list[str],
+        *,
+        run_id: int,
     ) -> tuple[
         int,
         int,
@@ -543,6 +625,13 @@ class DailyPipelineService:
             stock_codes
         )
 
+        self._update_run_progress(
+            run_id,
+            stage="trading_signals",
+            current=0,
+            total=total,
+        )
+
         for (
             index,
             stock_code,
@@ -550,6 +639,14 @@ class DailyPipelineService:
             stock_codes,
             start=1,
         ):
+            self._update_run_progress(
+                run_id,
+                stage="trading_signals",
+                current=index,
+                total=total,
+                stock_code=stock_code,
+            )
+
             try:
                 result = await (
                     self.market_data_service
@@ -607,6 +704,7 @@ class DailyPipelineService:
         stock_codes: list[str],
         *,
         today: date,
+        run_id: int,
     ) -> tuple[
         int,
         int,
@@ -615,6 +713,10 @@ class DailyPipelineService:
         success = 0
         failed = 0
         stored_rows = 0
+
+        total = len(
+            stock_codes
+        )
 
         history_start = (
             today
@@ -625,6 +727,13 @@ class DailyPipelineService:
             )
         )
 
+        self._update_run_progress(
+            run_id,
+            stage="daily_prices",
+            current=0,
+            total=total,
+        )
+
         for (
             index,
             stock_code,
@@ -632,6 +741,14 @@ class DailyPipelineService:
             stock_codes,
             start=1,
         ):
+            self._update_run_progress(
+                run_id,
+                stage="daily_prices",
+                current=index,
+                total=total,
+                stock_code=stock_code,
+            )
+
             try:
                 existing = (
                     self.stock_service
@@ -702,6 +819,7 @@ class DailyPipelineService:
         stock_codes: list[str],
         *,
         business_year: str,
+        run_id: int,
     ) -> tuple[
         int,
         int,
@@ -709,7 +827,32 @@ class DailyPipelineService:
         created = 0
         failed = 0
 
-        for stock_code in stock_codes:
+        total = len(
+            stock_codes
+        )
+
+        self._update_run_progress(
+            run_id,
+            stage="financials",
+            current=0,
+            total=total,
+        )
+
+        for (
+            index,
+            stock_code,
+        ) in enumerate(
+            stock_codes,
+            start=1,
+        ):
+            self._update_run_progress(
+                run_id,
+                stage="financials",
+                current=index,
+                total=total,
+                stock_code=stock_code,
+            )
+
             metric = (
                 self.financial_service
                 .repository
@@ -973,7 +1116,8 @@ class DailyPipelineService:
                     trading_signal_rows,
                 ) = await (
                     self._sync_trading_signals(
-                        universe
+                        universe,
+                        run_id=run_id,
                     )
                 )
 
@@ -985,6 +1129,7 @@ class DailyPipelineService:
                     self._sync_daily_prices(
                         universe,
                         today=today,
+                        run_id=run_id,
                     )
                 )
 
@@ -1127,8 +1272,17 @@ class DailyPipelineService:
                             business_year=(
                                 business_year
                             ),
+                            run_id=run_id,
                         )
                     )
+
+                self._update_run_progress(
+                    run_id,
+                    stage="ranking",
+                    current=0,
+                    total=1,
+                    force=True,
+                )
 
                 rankings = await (
                     self.stock_service
@@ -1138,6 +1292,14 @@ class DailyPipelineService:
                         ),
                         force_recompute=True,
                     )
+                )
+
+                self._update_run_progress(
+                    run_id,
+                    stage="ranking",
+                    current=1,
+                    total=1,
+                    force=True,
                 )
 
                 if len(
@@ -1180,9 +1342,38 @@ class DailyPipelineService:
                 top_disclosure_rows = 0
                 top_disclosure_failures = 0
 
-                for row in rankings[
+                top_context_rows = rankings[
                     :self.TOP_CONTEXT_LIMIT
-                ]:
+                ]
+
+                top_context_total = len(
+                    top_context_rows
+                )
+
+                self._update_run_progress(
+                    run_id,
+                    stage="top_context",
+                    current=0,
+                    total=top_context_total,
+                )
+
+                for (
+                    index,
+                    row,
+                ) in enumerate(
+                    top_context_rows,
+                    start=1,
+                ):
+                    self._update_run_progress(
+                        run_id,
+                        stage="top_context",
+                        current=index,
+                        total=top_context_total,
+                        stock_code=(
+                            row.stockCode
+                        ),
+                    )
+
                     try:
                         top_news_rows += await (
                             self.market_context_service
@@ -1246,7 +1437,34 @@ class DailyPipelineService:
                     self.db
                 )
 
-                for row in rankings:
+                analysis_total = len(
+                    rankings
+                )
+
+                self._update_run_progress(
+                    run_id,
+                    stage="analysis_snapshots",
+                    current=0,
+                    total=analysis_total,
+                )
+
+                for (
+                    index,
+                    row,
+                ) in enumerate(
+                    rankings,
+                    start=1,
+                ):
+                    self._update_run_progress(
+                        run_id,
+                        stage="analysis_snapshots",
+                        current=index,
+                        total=analysis_total,
+                        stock_code=(
+                            row.stockCode
+                        ),
+                    )
+
                     try:
                         analysis_service.save_daily_snapshot(
                             stock_code=(
@@ -1784,6 +2002,16 @@ class DailyPipelineService:
                     - evaluated
                 ),
             },
+            "progress": (
+                (
+                    latest_run.metadata_json
+                    or {}
+                ).get(
+                    "progress"
+                )
+                if latest_run
+                else None
+            ),
             "latestRun": (
                 {
                     "id": (
