@@ -1803,26 +1803,65 @@ class DailyPipelineService:
             )
         )
 
-        stale_running_count = int(
-            self.db.scalar(
-                select(
-                    func.count(
-                        DataSyncRun.id
-                    )
+        running_runs = self.db.scalars(
+            select(
+                DataSyncRun
+            )
+            .where(
+                DataSyncRun.source
+                == "automation",
+                DataSyncRun.sync_type
+                == "daily_pipeline",
+                DataSyncRun.status
+                == "running",
+            )
+        ).all()
+
+        stale_running_count = 0
+
+        for running_run in running_runs:
+            metadata = (
+                running_run.metadata_json
+                or {}
+            )
+
+            progress = (
+                metadata.get(
+                    "progress"
                 )
-                .where(
-                    DataSyncRun.source
-                    == "automation",
-                    DataSyncRun.sync_type
-                    == "daily_pipeline",
-                    DataSyncRun.status
-                    == "running",
-                    DataSyncRun.started_at
-                    < stale_before,
+                or {}
+            )
+
+            last_activity_at = (
+                running_run.started_at
+            )
+
+            progress_updated_at = (
+                progress.get(
+                    "updatedAt"
                 )
             )
-            or 0
-        )
+
+            if progress_updated_at:
+                try:
+                    last_activity_at = (
+                        datetime.fromisoformat(
+                            progress_updated_at
+                        )
+                    )
+                except (
+                    TypeError,
+                    ValueError,
+                ):
+                    pass
+
+            if (
+                last_activity_at
+                is not None
+                and last_activity_at
+                < stale_before
+            ):
+                stale_running_count += 1
 
         latest_snapshot = self.db.scalar(
             select(
