@@ -71,6 +71,447 @@ def refit_historical_final_model(
 
 
 @router.get(
+    "/historical/final-model/composite-smoke",
+)
+def smoke_test_final_composite_ranking(
+    limit: int = Query(
+        default=100,
+        ge=10,
+        le=100,
+    ),
+    db: Session = Depends(
+        get_db
+    ),
+):
+    try:
+        result = (
+            CompositeRankingService(
+                db
+            )
+            .score_current_universe(
+                limit=limit,
+            )
+        )
+
+    except (
+        FileNotFoundError,
+        RuntimeError,
+        ValueError,
+    ) as e:
+        raise HTTPException(
+            status_code=400,
+            detail=str(e),
+        ) from e
+
+    weights = result[
+        "weights"
+    ]
+
+    configured_ml_weight = float(
+        weights.get(
+            "ml",
+            0.0,
+        )
+    )
+
+    expected_ml_weight = float(
+        HistoricalMlFinalModelService
+        .PRODUCTION_ML_WEIGHT
+    )
+
+    if abs(
+        configured_ml_weight
+        - expected_ml_weight
+    ) > 1e-12:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Composite Ranking ML 가중치가 "
+                "최종 Production 기준과 "
+                "일치하지 않습니다: "
+                f"actual={configured_ml_weight}, "
+                f"expected={expected_ml_weight}"
+            ),
+        )
+
+    scores = result[
+        "scores"
+    ]
+
+    if not scores:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Composite Ranking 결과가 "
+                "비어 있습니다."
+            ),
+        )
+
+    analyzed_rows = []
+    formula_mismatch_count = 0
+    missing_ml_count = 0
+
+    for row in scores:
+        coverage = row.get(
+            "factor_coverage",
+            {},
+        )
+
+        weighted_score = 0.0
+        available_weight = 0.0
+
+        for factor_name, factor_weight in (
+            weights.items()
+        ):
+            factor_score = row.get(
+                f"{factor_name}_score"
+            )
+
+            factor_coverage = (
+                float(
+                    coverage.get(
+                        factor_name,
+                        0.0,
+                    )
+                )
+                / 100.0
+            )
+
+            if (
+                factor_score is None
+                or factor_coverage <= 0.0
+            ):
+                continue
+
+            available_weight += (
+                float(
+                    factor_weight
+                )
+                * factor_coverage
+            )
+
+            weighted_score += (
+                float(
+                    factor_score
+                )
+                * float(
+                    factor_weight
+                )
+                * factor_coverage
+            )
+
+        if available_weight <= 0.0:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Composite Ranking의 "
+                    "available weight가 0입니다: "
+                    f"{row.get('stock_code')}"
+                ),
+            )
+
+        expected_total_score = (
+            weighted_score
+            / available_weight
+        )
+
+        actual_total_score = float(
+            row[
+                "total_score"
+            ]
+        )
+
+        formula_error = abs(
+            expected_total_score
+            - actual_total_score
+        )
+
+        if formula_error > 0.001:
+            formula_mismatch_count += 1
+
+        ml_score = row.get(
+            "ml_score"
+        )
+
+        ml_coverage = (
+            float(
+                coverage.get(
+                    "ml",
+                    0.0,
+                )
+            )
+            / 100.0
+        )
+
+        if (
+            ml_score is None
+            or ml_coverage <= 0.0
+        ):
+            missing_ml_count += 1
+
+        ml_available_weight = (
+            configured_ml_weight
+            * ml_coverage
+        )
+
+        without_ml_available_weight = (
+            available_weight
+            - ml_available_weight
+        )
+
+        without_ml_weighted_score = (
+            weighted_score
+            - (
+                float(
+                    ml_score or 0.0
+                )
+                * configured_ml_weight
+                * ml_coverage
+            )
+        )
+
+        score_without_ml = (
+            without_ml_weighted_score
+            / without_ml_available_weight
+            if without_ml_available_weight
+            > 0.0
+            else None
+        )
+
+        effective_ml_weight_pct = (
+            (
+                ml_available_weight
+                / available_weight
+                * 100.0
+            )
+            if available_weight > 0.0
+            else 0.0
+        )
+
+        analyzed_rows.append(
+            {
+                "current_rank":
+                    int(
+                        row[
+                            "rank"
+                        ]
+                    ),
+
+                "stock_code":
+                    row[
+                        "stock_code"
+                    ],
+
+                "stock_name":
+                    row[
+                        "stock_name"
+                    ],
+
+                "total_score":
+                    actual_total_score,
+
+                "expected_total_score":
+                    round(
+                        expected_total_score,
+                        6,
+                    ),
+
+                "formula_error":
+                    round(
+                        formula_error,
+                        8,
+                    ),
+
+                "ml_score":
+                    ml_score,
+
+                "configured_ml_weight_pct":
+                    round(
+                        configured_ml_weight
+                        * 100.0,
+                        4,
+                    ),
+
+                "effective_ml_weight_pct":
+                    round(
+                        effective_ml_weight_pct,
+                        4,
+                    ),
+
+                "score_without_ml":
+                    (
+                        round(
+                            score_without_ml,
+                            6,
+                        )
+                        if score_without_ml
+                        is not None
+                        else None
+                    ),
+
+                "total_score_delta_from_ml":
+                    (
+                        round(
+                            actual_total_score
+                            - score_without_ml,
+                            6,
+                        )
+                        if score_without_ml
+                        is not None
+                        else None
+                    ),
+            }
+        )
+
+    without_ml_sorted = sorted(
+        analyzed_rows,
+        key=lambda row: (
+            row[
+                "score_without_ml"
+            ]
+            if row[
+                "score_without_ml"
+            ]
+            is not None
+            else float(
+                "-inf"
+            ),
+            row[
+                "stock_code"
+            ],
+        ),
+        reverse=True,
+    )
+
+    without_ml_rank = {
+        row[
+            "stock_code"
+        ]: index
+        for index, row
+        in enumerate(
+            without_ml_sorted,
+            start=1,
+        )
+    }
+
+    for row in analyzed_rows:
+        previous_rank = (
+            without_ml_rank[
+                row[
+                    "stock_code"
+                ]
+            ]
+        )
+
+        row[
+            "rank_without_ml_within_returned_universe"
+        ] = previous_rank
+
+        row[
+            "rank_improvement_from_ml"
+        ] = (
+            previous_rank
+            - row[
+                "current_rank"
+            ]
+        )
+
+    ranking_changed_count = sum(
+        1
+        for row in analyzed_rows
+        if row[
+            "rank_improvement_from_ml"
+        ] != 0
+    )
+
+    max_absolute_rank_change = max(
+        abs(
+            row[
+                "rank_improvement_from_ml"
+            ]
+        )
+        for row in analyzed_rows
+    )
+
+    if (
+        missing_ml_count > 0
+        or formula_mismatch_count > 0
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "message":
+                    "Composite Ranking ML 통합 검증 실패",
+
+                "missing_ml_count":
+                    missing_ml_count,
+
+                "formula_mismatch_count":
+                    formula_mismatch_count,
+            },
+        )
+
+    return {
+        "status":
+            "pass",
+
+        "phase":
+            "7.3",
+
+        "strategy":
+            result[
+                "strategy"
+            ],
+
+        "weights":
+            weights,
+
+        "configured_ml_weight_pct":
+            configured_ml_weight
+            * 100.0,
+
+        "candidate_count":
+            result[
+                "candidate_count"
+            ],
+
+        "eligible_count":
+            result[
+                "eligible_count"
+            ],
+
+        "universe_count":
+            result[
+                "universe_count"
+            ],
+
+        "ml_coverage_count":
+            result[
+                "coverage"
+            ][
+                "ml"
+            ],
+
+        "selected_ml_missing_count":
+            missing_ml_count,
+
+        "formula_mismatch_count":
+            formula_mismatch_count,
+
+        "ranking_changed_count":
+            ranking_changed_count,
+
+        "max_absolute_rank_change":
+            max_absolute_rank_change,
+
+        "top10":
+            analyzed_rows[
+                :10
+            ],
+    }
+
+
+@router.get(
     "/historical/final-model/inference-smoke",
 )
 def smoke_test_final_model_inference(
