@@ -913,6 +913,576 @@ class HistoricalMlAblationService:
                 harmful_features,
         }
 
+    def run_locked_test_final_comparison(
+        self,
+        *,
+        feature_version: str,
+        horizon: int = 5,
+    ) -> dict:
+        dataset_service = (
+            HistoricalDatasetService(
+                self.db
+            )
+        )
+
+        dataset = (
+            dataset_service
+            .build_dataset(
+                feature_version=(
+                    feature_version
+                ),
+                horizon=horizon,
+                feature_strategy=(
+                    "stock_internal_only"
+                ),
+            )
+        )
+
+        split = (
+            self.training_service
+            .build_temporal_split(
+                feature_version=(
+                    feature_version
+                ),
+                horizon=horizon,
+                feature_strategy=(
+                    "stock_internal_only"
+                ),
+                dataset=dataset,
+            )
+        )
+
+        selected_indexes = (
+            HistoricalMlWalkForwardService
+            ._selected_indexes(
+                feature_names=(
+                    dataset.feature_names
+                ),
+                feature_strategy=(
+                    "stock_internal_only"
+                ),
+            )
+        )
+
+        baseline_indexes = list(
+            selected_indexes
+        )
+
+        candidate_indexes = [
+            index
+            for index
+            in selected_indexes
+            if dataset.feature_names[
+                index
+            ] != "rsi_14"
+        ]
+
+        if len(candidate_indexes) != (
+            len(baseline_indexes) - 1
+        ):
+            raise ValueError(
+                "rsi_14 Feature 제거 상태를 "
+                "확인할 수 없습니다."
+            )
+
+        train_x_source = np.concatenate(
+            [
+                np.asarray(
+                    split.x_train,
+                    dtype=np.float32,
+                ),
+                np.asarray(
+                    split.x_valid,
+                    dtype=np.float32,
+                ),
+            ],
+            axis=0,
+        )
+
+        train_return = np.concatenate(
+            [
+                np.asarray(
+                    split.y_train,
+                    dtype=np.float32,
+                ),
+                np.asarray(
+                    split.y_valid,
+                    dtype=np.float32,
+                ),
+            ]
+        )
+
+        train_y = (
+            train_return > 0.0
+        ).astype(
+            np.int32
+        )
+
+        test_x_source = np.asarray(
+            split.x_test,
+            dtype=np.float32,
+        )
+
+        test_return = np.asarray(
+            split.y_test,
+            dtype=np.float32,
+        )
+
+        test_y = (
+            test_return > 0.0
+        ).astype(
+            np.int32
+        )
+
+        oof_service = (
+            HistoricalMlOofService(
+                self.db
+            )
+        )
+
+        def evaluate(
+            *,
+            name: str,
+            indexes: list[int],
+            removed_features: list[str],
+        ) -> dict:
+            classifier = (
+                oof_service
+                ._make_classifier(
+                    classifier_params=(
+                        dict(
+                            HistoricalMlOofService
+                            .FINAL_PARAMS
+                        )
+                    ),
+                )
+            )
+
+            classifier.fit(
+                train_x_source[
+                    :,
+                    indexes
+                ],
+                train_y,
+            )
+
+            probability = (
+                classifier
+                .predict_proba(
+                    test_x_source[
+                        :,
+                        indexes
+                    ]
+                )[:, 1]
+            )
+
+            probability_metrics = (
+                oof_service
+                .calibration_service
+                ._metrics(
+                    y_true=test_y,
+                    probability=(
+                        probability
+                    ),
+                )
+            )
+
+            ranking_metrics = (
+                oof_service
+                ._ranking_metrics(
+                    probabilities=(
+                        probability
+                    ),
+                    future_returns=(
+                        test_return
+                    ),
+                    stock_codes=(
+                        split.test_stock_codes
+                    ),
+                    feature_dates=(
+                        split.test_dates
+                    ),
+                    rebalance_step=horizon,
+                )
+            )
+
+            top10_cost20 = next(
+                scenario[
+                    "summary"
+                ]
+                for scenario
+                in ranking_metrics[
+                    "portfolio_backtest"
+                ][
+                    "scenarios"
+                ]
+                if (
+                    scenario[
+                        "portfolio_size"
+                    ] == 10
+                    and scenario[
+                        "transaction_cost_bps"
+                    ] == 20.0
+                )
+            )
+
+            buffer_top10 = next(
+                scenario[
+                    "summary"
+                ]
+                for scenario
+                in ranking_metrics[
+                    "turnover_buffer_backtest"
+                ][
+                    "scenarios"
+                ]
+                if (
+                    scenario[
+                        "portfolio_size"
+                    ] == 10
+                    and scenario[
+                        "exit_rank"
+                    ] == 20
+                    and scenario[
+                        "transaction_cost_bps"
+                    ] == 20.0
+                )
+            )
+
+            return {
+                "name":
+                    name,
+
+                "feature_count":
+                    len(
+                        indexes
+                    ),
+
+                "feature_names": [
+                    dataset.feature_names[
+                        index
+                    ]
+                    for index
+                    in indexes
+                ],
+
+                "removed_features":
+                    removed_features,
+
+                "objective":
+                    "binary:logistic",
+
+                "classifier_params":
+                    dict(
+                        HistoricalMlOofService
+                        .FINAL_PARAMS
+                    ),
+
+                "probability_metrics":
+                    probability_metrics,
+
+                "ranking_metrics": {
+                    "spearman_ic_mean":
+                        ranking_metrics[
+                            "spearman_ic_mean"
+                        ],
+
+                    "spearman_ic_positive_rate_pct":
+                        ranking_metrics[
+                            "spearman_ic_positive_rate_pct"
+                        ],
+
+                    "top10_excess_mean_pct":
+                        ranking_metrics[
+                            "top10_excess_mean_pct"
+                        ],
+
+                    "top10_excess_positive_rate_pct":
+                        ranking_metrics[
+                            "top10_excess_positive_rate_pct"
+                        ],
+
+                    "top20_excess_mean_pct":
+                        ranking_metrics[
+                            "top20_excess_mean_pct"
+                        ],
+
+                    "top20_excess_positive_rate_pct":
+                        ranking_metrics[
+                            "top20_excess_positive_rate_pct"
+                        ],
+
+                    "long_short_10_mean_pct":
+                        ranking_metrics[
+                            "long_short_10_mean_pct"
+                        ],
+
+                    "long_short_10_positive_rate_pct":
+                        ranking_metrics[
+                            "long_short_10_positive_rate_pct"
+                        ],
+                },
+
+                "top10_cost20":
+                    top10_cost20,
+
+                "buffer_top10_exit20_cost20":
+                    buffer_top10,
+            }
+
+        baseline = evaluate(
+            name=(
+                "production_baseline_27"
+            ),
+            indexes=(
+                baseline_indexes
+            ),
+            removed_features=[],
+        )
+
+        candidate = evaluate(
+            name=(
+                "candidate_no_rsi_26"
+            ),
+            indexes=(
+                candidate_indexes
+            ),
+            removed_features=[
+                "rsi_14",
+            ],
+        )
+
+        baseline_probability = (
+            baseline[
+                "probability_metrics"
+            ]
+        )
+
+        candidate_probability = (
+            candidate[
+                "probability_metrics"
+            ]
+        )
+
+        baseline_ranking = (
+            baseline[
+                "ranking_metrics"
+            ]
+        )
+
+        candidate_ranking = (
+            candidate[
+                "ranking_metrics"
+            ]
+        )
+
+        return {
+            "status":
+                "pass",
+
+            "phase":
+                "6.4",
+
+            "feature_version":
+                feature_version,
+
+            "target_horizon":
+                horizon,
+
+            "test_dataset_used":
+                True,
+
+            "locked_test_rule":
+                (
+                    "Train+Validation으로만 재학습 후 "
+                    "Locked Test를 최종 1회 비교에 사용. "
+                    "이 결과 이후 Feature/Parameter/Weight "
+                    "재튜닝 금지"
+                ),
+
+            "training_rows":
+                int(
+                    len(
+                        train_y
+                    )
+                ),
+
+            "training_first_date":
+                min(
+                    split.train_dates
+                ).isoformat(),
+
+            "training_last_date":
+                max(
+                    split.valid_dates
+                ).isoformat(),
+
+            "locked_test": {
+                "rows":
+                    int(
+                        len(
+                            test_y
+                        )
+                    ),
+
+                "first_date":
+                    min(
+                        split.test_dates
+                    ).isoformat(),
+
+                "last_date":
+                    max(
+                        split.test_dates
+                    ).isoformat(),
+
+                "stocks":
+                    len(
+                        set(
+                            split.test_stock_codes
+                        )
+                    ),
+
+                "unique_dates":
+                    len(
+                        set(
+                            split.test_dates
+                        )
+                    ),
+            },
+
+            "production_baseline":
+                baseline,
+
+            "candidate":
+                candidate,
+
+            "candidate_delta_vs_baseline": {
+                "roc_auc":
+                    candidate_probability[
+                        "roc_auc"
+                    ]
+                    - baseline_probability[
+                        "roc_auc"
+                    ],
+
+                "log_loss":
+                    candidate_probability[
+                        "log_loss"
+                    ]
+                    - baseline_probability[
+                        "log_loss"
+                    ],
+
+                "brier_score":
+                    candidate_probability[
+                        "brier_score"
+                    ]
+                    - baseline_probability[
+                        "brier_score"
+                    ],
+
+                "ece_10":
+                    candidate_probability[
+                        "ece_10"
+                    ]
+                    - baseline_probability[
+                        "ece_10"
+                    ],
+
+                "spearman_ic_mean":
+                    candidate_ranking[
+                        "spearman_ic_mean"
+                    ]
+                    - baseline_ranking[
+                        "spearman_ic_mean"
+                    ],
+
+                "top10_excess_mean_pct":
+                    candidate_ranking[
+                        "top10_excess_mean_pct"
+                    ]
+                    - baseline_ranking[
+                        "top10_excess_mean_pct"
+                    ],
+
+                "top20_excess_mean_pct":
+                    candidate_ranking[
+                        "top20_excess_mean_pct"
+                    ]
+                    - baseline_ranking[
+                        "top20_excess_mean_pct"
+                    ],
+
+                "long_short_10_mean_pct":
+                    candidate_ranking[
+                        "long_short_10_mean_pct"
+                    ]
+                    - baseline_ranking[
+                        "long_short_10_mean_pct"
+                    ],
+
+                "top10_cost20_net_excess_pct":
+                    candidate[
+                        "top10_cost20"
+                    ][
+                        "net_excess_offset_mean_pct"
+                    ]
+                    - baseline[
+                        "top10_cost20"
+                    ][
+                        "net_excess_offset_mean_pct"
+                    ],
+
+                "buffer_net_excess_pct":
+                    candidate[
+                        "buffer_top10_exit20_cost20"
+                    ][
+                        "net_excess_offset_mean_pct"
+                    ]
+                    - baseline[
+                        "buffer_top10_exit20_cost20"
+                    ][
+                        "net_excess_offset_mean_pct"
+                    ],
+
+                "buffer_cumulative_excess_pct":
+                    candidate[
+                        "buffer_top10_exit20_cost20"
+                    ][
+                        "cumulative_excess_offset_mean_pct"
+                    ]
+                    - baseline[
+                        "buffer_top10_exit20_cost20"
+                    ][
+                        "cumulative_excess_offset_mean_pct"
+                    ],
+
+                "buffer_max_drawdown_pct":
+                    candidate[
+                        "buffer_top10_exit20_cost20"
+                    ][
+                        "max_drawdown_offset_worst_pct"
+                    ]
+                    - baseline[
+                        "buffer_top10_exit20_cost20"
+                    ][
+                        "max_drawdown_offset_worst_pct"
+                    ],
+
+                "buffer_turnover_pct":
+                    candidate[
+                        "buffer_top10_exit20_cost20"
+                    ][
+                        "turnover_offset_mean_pct"
+                    ]
+                    - baseline[
+                        "buffer_top10_exit20_cost20"
+                    ][
+                        "turnover_offset_mean_pct"
+                    ],
+            },
+        }
+
     def run_oof_objective_experiment(
         self,
         *,

@@ -646,6 +646,57 @@ def compare_historical_feature_subset(
 
 
 @router.post(
+    "/historical/locked-test/final-compare",
+)
+def compare_locked_test_final_candidate(
+    confirm: bool = Query(
+        default=False,
+    ),
+    feature_version: str = Query(
+        default=(
+            HistoricalMlFinalModelService
+            .FEATURE_VERSION
+        ),
+        min_length=1,
+        max_length=40,
+    ),
+    db: Session = Depends(
+        get_db
+    ),
+):
+    if not confirm:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Locked Test 최종 검증입니다. "
+                "실행하려면 confirm=true를 지정하세요."
+            ),
+        )
+
+    try:
+        return (
+            HistoricalMlAblationService(
+                db
+            )
+            .run_locked_test_final_comparison(
+                feature_version=(
+                    feature_version
+                ),
+                horizon=(
+                    HistoricalMlFinalModelService
+                    .HORIZON
+                ),
+            )
+        )
+
+    except ValueError as e:
+        raise HTTPException(
+            status_code=400,
+            detail=str(e),
+        ) from e
+
+
+@router.post(
     "/historical/oof/candidate-ml-weight-sweep",
 )
 def compare_candidate_historical_ml_weights(
