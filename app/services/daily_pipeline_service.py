@@ -435,13 +435,6 @@ class DailyPipelineService:
     def _recover_stale_runs(
         self,
     ) -> int:
-        stale_before = (
-            datetime.utcnow()
-            - timedelta(
-                hours=2
-            )
-        )
-
         stale_runs = self.db.scalars(
             select(
                 DataSyncRun
@@ -453,8 +446,6 @@ class DailyPipelineService:
                 == "daily_pipeline",
                 DataSyncRun.status
                 == "running",
-                DataSyncRun.started_at
-                < stale_before,
             )
             .order_by(
                 DataSyncRun.started_at.asc()
@@ -476,7 +467,7 @@ class DailyPipelineService:
             )
 
             run.error_message = (
-                "stale running 상태 자동 복구"
+                "orphaned running 상태 자동 복구"
             )
 
             metadata = dict(
@@ -491,6 +482,13 @@ class DailyPipelineService:
             metadata[
                 "staleRunRecoveredAt"
             ] = recovered_at.isoformat()
+
+            metadata[
+                "recoveryReason"
+            ] = (
+                "advisory_lock_acquired_"
+                "with_existing_running_run"
+            )
 
             run.metadata_json = (
                 metadata
