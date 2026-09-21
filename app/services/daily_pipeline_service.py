@@ -1350,6 +1350,100 @@ class DailyPipelineService:
             .limit(1)
         )
 
+        today_start_kst = datetime.combine(
+            today,
+            datetime.min.time(),
+            tzinfo=self.KST,
+        )
+
+        tomorrow_start_kst = (
+            today_start_kst
+            + timedelta(
+                days=1
+            )
+        )
+
+        utc = ZoneInfo("UTC")
+
+        today_start_utc = (
+            today_start_kst
+            .astimezone(
+                utc
+            )
+            .replace(
+                tzinfo=None
+            )
+        )
+
+        tomorrow_start_utc = (
+            tomorrow_start_kst
+            .astimezone(
+                utc
+            )
+            .replace(
+                tzinfo=None
+            )
+        )
+
+        today_run_rows = self.db.execute(
+            select(
+                DataSyncRun.status,
+                func.count(
+                    DataSyncRun.id
+                ),
+            )
+            .where(
+                DataSyncRun.source
+                == "automation",
+                DataSyncRun.sync_type
+                == "daily_pipeline",
+                DataSyncRun.started_at
+                >= today_start_utc,
+                DataSyncRun.started_at
+                < tomorrow_start_utc,
+            )
+            .group_by(
+                DataSyncRun.status
+            )
+        ).all()
+
+        today_run_counts = {
+            str(status): int(
+                count
+                or 0
+            )
+            for status, count
+            in today_run_rows
+        }
+
+        stale_before = (
+            datetime.utcnow()
+            - timedelta(
+                hours=2
+            )
+        )
+
+        stale_running_count = int(
+            self.db.scalar(
+                select(
+                    func.count(
+                        DataSyncRun.id
+                    )
+                )
+                .where(
+                    DataSyncRun.source
+                    == "automation",
+                    DataSyncRun.sync_type
+                    == "daily_pipeline",
+                    DataSyncRun.status
+                    == "running",
+                    DataSyncRun.started_at
+                    < stale_before,
+                )
+            )
+            or 0
+        )
+
         latest_snapshot = self.db.scalar(
             select(
                 RankingSnapshot
@@ -1494,6 +1588,40 @@ class DailyPipelineService:
                 if latest_snapshot
                 else None
             ),
+            "automationRuns": {
+                "today": {
+                    "total": sum(
+                        today_run_counts.values()
+                    ),
+                    "running": (
+                        today_run_counts.get(
+                            "running",
+                            0,
+                        )
+                    ),
+                    "completed": (
+                        today_run_counts.get(
+                            "completed",
+                            0,
+                        )
+                    ),
+                    "failed": (
+                        today_run_counts.get(
+                            "failed",
+                            0,
+                        )
+                    ),
+                    "skipped": (
+                        today_run_counts.get(
+                            "skipped",
+                            0,
+                        )
+                    ),
+                },
+                "staleRunningCount": (
+                    stale_running_count
+                ),
+            },
             "performance": {
                 "total": total,
                 "evaluated": (
