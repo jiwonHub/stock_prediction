@@ -14,6 +14,7 @@ from app.models.future import (
     RankingItem,
     RankingSnapshot,
     RecommendationPerformance,
+    StockAnalysisSnapshot,
 )
 from app.models.stock_price import StockPrice
 from app.services.financial_analysis_service import (
@@ -233,6 +234,147 @@ class DailyPipelineService:
         )
 
         return snapshot_id is not None
+
+    def _snapshot_item_count(
+        self,
+        snapshot_date: date,
+    ) -> int:
+        return int(
+            self.db.scalar(
+                select(
+                    func.count(
+                        RankingItem.id
+                    )
+                )
+                .join(
+                    RankingSnapshot,
+                    RankingSnapshot.id
+                    == RankingItem.snapshot_id,
+                )
+                .where(
+                    RankingSnapshot.ranking_version
+                    == self.market_context_service.RANKING_VERSION,
+                    RankingSnapshot.as_of_date
+                    == snapshot_date,
+                    RankingSnapshot.horizon_days
+                    == self.market_context_service.PRIMARY_HORIZON_DAYS,
+                    RankingSnapshot.universe
+                    == "KRX",
+                )
+            )
+            or 0
+        )
+
+    def _analysis_snapshot_count(
+        self,
+        snapshot_date: date,
+    ) -> int:
+        return int(
+            self.db.scalar(
+                select(
+                    func.count(
+                        StockAnalysisSnapshot.id
+                    )
+                )
+                .join(
+                    RankingItem,
+                    RankingItem.stock_code
+                    == StockAnalysisSnapshot.stock_code,
+                )
+                .join(
+                    RankingSnapshot,
+                    RankingSnapshot.id
+                    == RankingItem.snapshot_id,
+                )
+                .where(
+                    StockAnalysisSnapshot.snapshot_date
+                    == snapshot_date,
+                    StockAnalysisSnapshot.ranking_version
+                    == self.market_context_service.RANKING_VERSION,
+                    RankingSnapshot.ranking_version
+                    == self.market_context_service.RANKING_VERSION,
+                    RankingSnapshot.as_of_date
+                    == snapshot_date,
+                    RankingSnapshot.horizon_days
+                    == self.market_context_service.PRIMARY_HORIZON_DAYS,
+                    RankingSnapshot.universe
+                    == "KRX",
+                )
+            )
+            or 0
+        )
+
+    def _expected_performance_count(
+        self,
+    ) -> int:
+        tracked_rank_count = min(
+            self.RANKING_LIMIT,
+            self.market_context_service.PERFORMANCE_RANK_LIMIT,
+        )
+
+        return (
+            tracked_rank_count
+            * len(
+                self.market_context_service.PERFORMANCE_HORIZONS
+            )
+        )
+
+    def _snapshot_performance_count(
+        self,
+        snapshot_date: date,
+    ) -> int:
+        return int(
+            self.db.scalar(
+                select(
+                    func.count(
+                        RecommendationPerformance.id
+                    )
+                )
+                .join(
+                    RankingItem,
+                    RankingItem.id
+                    == RecommendationPerformance.ranking_item_id,
+                )
+                .join(
+                    RankingSnapshot,
+                    RankingSnapshot.id
+                    == RankingItem.snapshot_id,
+                )
+                .where(
+                    RankingSnapshot.ranking_version
+                    == self.market_context_service.RANKING_VERSION,
+                    RankingSnapshot.as_of_date
+                    == snapshot_date,
+                    RankingSnapshot.horizon_days
+                    == self.market_context_service.PRIMARY_HORIZON_DAYS,
+                    RankingSnapshot.universe
+                    == "KRX",
+                )
+            )
+            or 0
+        )
+
+    def _daily_artifacts_complete(
+        self,
+        snapshot_date: date,
+    ) -> bool:
+        return (
+            self._snapshot_exists(
+                snapshot_date
+            )
+            and self._snapshot_item_count(
+                snapshot_date
+            )
+            == self.RANKING_LIMIT
+            and self._analysis_snapshot_count(
+                snapshot_date
+            )
+            == self.RANKING_LIMIT
+            and self._snapshot_performance_count(
+                snapshot_date
+            )
+            == self._expected_performance_count()
+        )
 
     def _daily_refresh_completed(
         self,
@@ -554,13 +696,21 @@ class DailyPipelineService:
                 recovered_at
             )
 
-            run.error_message = (
+            recovery_message = (
                 "orphaned running 상태 자동 복구"
+            )
+
+            run.error_message = (
+                recovery_message
             )
 
             metadata = dict(
                 run.metadata_json
                 or {}
+            )
+
+            progress = metadata.get(
+                "progress"
             )
 
             metadata[
@@ -577,6 +727,76 @@ class DailyPipelineService:
                 "advisory_lock_acquired_"
                 "with_existing_running_run"
             )
+
+            metadata[
+                "failedAt"
+            ] = recovered_at.isoformat()
+
+            metadata[
+                "exceptionType"
+            ] = "OrphanedRunRecovery"
+
+            metadata[
+                "error"
+            ] = {
+                "type": (
+                    "OrphanedRunRecovery"
+                ),
+                "message": (
+                    recovery_message
+                ),
+            }
+
+            metadata[
+                "durationSeconds"
+            ] = round(
+                max(
+                    (
+                        recovered_at
+                        - run.started_at
+                    ).total_seconds(),
+                    0.0,
+                ),
+                1,
+            )
+
+            if isinstance(
+                progress,
+                dict,
+            ):
+                failed_stage = (
+                    progress.get(
+                        "stage"
+                    )
+                )
+
+                metadata[
+                    "failedStage"
+                ] = failed_stage
+
+                metadata[
+                    "failedStageLabel"
+                ] = (
+                    progress.get(
+                        "stageLabel"
+                    )
+                    or self.PROGRESS_STAGE_LABELS.get(
+                        failed_stage,
+                        failed_stage,
+                    )
+                )
+
+                metadata[
+                    "failedStockCode"
+                ] = progress.get(
+                    "stockCode"
+                )
+
+                metadata[
+                    "failedProgress"
+                ] = dict(
+                    progress
+                )
 
             run.metadata_json = (
                 metadata
@@ -1117,7 +1337,10 @@ class DailyPipelineService:
                     return result
 
                 if (
-                    self._daily_refresh_completed(
+                    self._daily_artifacts_complete(
+                        today
+                    )
+                    and self._daily_refresh_completed(
                         today
                     )
                     and not force
@@ -1529,12 +1752,12 @@ class DailyPipelineService:
 
                 if len(
                     rankings
-                ) < 10:
+                ) != self.RANKING_LIMIT:
                     raise RuntimeError(
-                        "랭킹 결과가 "
-                        "10종목 미만입니다."
+                        "랭킹 결과 개수가 "
+                        f"{self.RANKING_LIMIT}종목이 아닙니다. "
+                        f"actual={len(rankings)}"
                     )
-
                 # 성과 진입가는
                 # 장 마감 일봉 종가를 사용합니다.
                 close_map = (
@@ -1705,6 +1928,42 @@ class DailyPipelineService:
                     replace_existing=True,
                 )
 
+                persisted_ranking_count = (
+                    self._snapshot_item_count(
+                        market_date
+                    )
+                )
+
+                if (
+                    persisted_ranking_count
+                    != self.RANKING_LIMIT
+                ):
+                    raise RuntimeError(
+                        "RankingSnapshot 저장 개수가 "
+                        f"{self.RANKING_LIMIT}종목이 아닙니다. "
+                        f"actual={persisted_ranking_count}"
+                    )
+
+                expected_performance_count = (
+                    self._expected_performance_count()
+                )
+
+                persisted_performance_count = (
+                    self._snapshot_performance_count(
+                        market_date
+                    )
+                )
+
+                if (
+                    persisted_performance_count
+                    != expected_performance_count
+                ):
+                    raise RuntimeError(
+                        "추천 성과 추적 저장 개수가 "
+                        f"{expected_performance_count}건이 아닙니다. "
+                        f"actual={persisted_performance_count}"
+                    )
+
                 self._update_run_progress(
                     run_id,
                     stage="ranking_snapshot",
@@ -1773,6 +2032,43 @@ class DailyPipelineService:
                             flush=True,
                         )
 
+                if (
+                    analysis_snapshot_success
+                    != self.RANKING_LIMIT
+                    or analysis_snapshot_failures
+                    > 0
+                ):
+                    raise RuntimeError(
+                        "분석 스냅샷 생성이 완전하지 않습니다. "
+                        f"success={analysis_snapshot_success} "
+                        f"failed={analysis_snapshot_failures} "
+                        f"expected={self.RANKING_LIMIT}"
+                    )
+
+                persisted_analysis_snapshot_count = (
+                    self._analysis_snapshot_count(
+                        market_date
+                    )
+                )
+
+                if (
+                    persisted_analysis_snapshot_count
+                    != self.RANKING_LIMIT
+                ):
+                    raise RuntimeError(
+                        "분석 스냅샷 저장 개수가 "
+                        f"{self.RANKING_LIMIT}건이 아닙니다. "
+                        f"actual={persisted_analysis_snapshot_count}"
+                    )
+
+                self._update_run_progress(
+                    run_id,
+                    stage="analysis_snapshots",
+                    current=analysis_total,
+                    total=analysis_total,
+                    force=True,
+                )
+
                 self._update_run_progress(
                     run_id,
                     stage="final_performance_evaluation",
@@ -1780,7 +2076,6 @@ class DailyPipelineService:
                     total=1,
                     force=True,
                 )
-
                 self.market_context_service.evaluate_performance()
 
                 self._update_run_progress(
@@ -1966,6 +2261,32 @@ class DailyPipelineService:
                             analysis_snapshot_failures
                         ),
                     },
+                    "integrity": {
+                        "rankingItems": (
+                            persisted_ranking_count
+                        ),
+                        "expectedRankingItems": (
+                            self.RANKING_LIMIT
+                        ),
+                        "analysisSnapshots": (
+                            persisted_analysis_snapshot_count
+                        ),
+                        "expectedAnalysisSnapshots": (
+                            self.RANKING_LIMIT
+                        ),
+                        "performanceRows": (
+                            persisted_performance_count
+                        ),
+                        "expectedPerformanceRows": (
+                            expected_performance_count
+                        ),
+                    },
+                    "hasWarnings": (
+                        total_failures > 0
+                    ),
+                    "warningCount": (
+                        total_failures
+                    ),
                 }
 
                 self._update_run_progress(
@@ -2247,16 +2568,22 @@ class DailyPipelineService:
             )
             .where(
                 RankingSnapshot.ranking_version
-                == self.market_context_service.RANKING_VERSION
+                == self.market_context_service.RANKING_VERSION,
+                RankingSnapshot.horizon_days
+                == self.market_context_service.PRIMARY_HORIZON_DAYS,
+                RankingSnapshot.universe
+                == "KRX",
             )
             .order_by(
-                RankingSnapshot.as_of_date.desc()
+                RankingSnapshot.as_of_date.desc(),
+                RankingSnapshot.id.desc(),
             )
             .limit(1)
         )
 
         latest_snapshot_item_count = 0
         latest_snapshot_performance_count = 0
+        latest_analysis_snapshot_count = 0
 
         if latest_snapshot is not None:
             latest_snapshot_item_count = int(
@@ -2292,6 +2619,12 @@ class DailyPipelineService:
                     )
                 )
                 or 0
+            )
+
+            latest_analysis_snapshot_count = (
+                self._analysis_snapshot_count(
+                    latest_snapshot.as_of_date
+                )
             )
 
         latest_market_date = (
@@ -2359,6 +2692,9 @@ class DailyPipelineService:
                 is not None
                 and latest_snapshot.as_of_date
                 == today
+                and self._daily_artifacts_complete(
+                    today
+                )
                 and self._daily_refresh_completed(
                     today
                 )
@@ -2383,6 +2719,23 @@ class DailyPipelineService:
                     ),
                     "performanceCount": (
                         latest_snapshot_performance_count
+                    ),
+                    "expectedPerformanceCount": (
+                        self._expected_performance_count()
+                    ),
+                    "analysisSnapshotCount": (
+                        latest_analysis_snapshot_count
+                    ),
+                    "expectedAnalysisSnapshotCount": (
+                        self.RANKING_LIMIT
+                    ),
+                    "integrityOk": (
+                        latest_snapshot_item_count
+                        == self.RANKING_LIMIT
+                        and latest_snapshot_performance_count
+                        == self._expected_performance_count()
+                        and latest_analysis_snapshot_count
+                        == self.RANKING_LIMIT
                     ),
                 }
                 if latest_snapshot
