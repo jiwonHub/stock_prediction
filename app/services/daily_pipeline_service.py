@@ -456,6 +456,53 @@ class DailyPipelineService:
         finally:
             progress_db.close()
 
+    def _get_run_progress(
+        self,
+        run_id: int,
+    ) -> dict | None:
+        progress_db = SessionLocal()
+
+        try:
+            run = progress_db.get(
+                DataSyncRun,
+                run_id,
+            )
+
+            if run is None:
+                return None
+
+            progress = (
+                (
+                    run.metadata_json
+                    or {}
+                ).get(
+                    "progress"
+                )
+            )
+
+            if not isinstance(
+                progress,
+                dict,
+            ):
+                return None
+
+            return dict(
+                progress
+            )
+
+        except Exception as e:
+            print(
+                "[DAILY][PROGRESS] "
+                "read failed: "
+                f"{type(e).__name__}: {e}",
+                flush=True,
+            )
+
+            return None
+
+        finally:
+            progress_db.close()
+
     def _recover_stale_runs(
         self,
     ) -> int:
@@ -1941,22 +1988,64 @@ class DailyPipelineService:
             except Exception as e:
                 self.db.rollback()
 
+                failed_progress = (
+                    self._get_run_progress(
+                        run_id
+                    )
+                )
+
+                failure_metadata = {
+                    "date": (
+                        today.isoformat()
+                    ),
+                    "exceptionType": (
+                        type(
+                            e
+                        ).__name__
+                    ),
+                }
+
+                if failed_progress:
+                    failed_stage = (
+                        failed_progress.get(
+                            "stage"
+                        )
+                    )
+
+                    failure_metadata.update(
+                        {
+                            "failedStage": (
+                                failed_stage
+                            ),
+                            "failedStageLabel": (
+                                failed_progress.get(
+                                    "stageLabel"
+                                )
+                                or self.PROGRESS_STAGE_LABELS.get(
+                                    failed_stage,
+                                    failed_stage,
+                                )
+                            ),
+                            "failedStockCode": (
+                                failed_progress.get(
+                                    "stockCode"
+                                )
+                            ),
+                            "failedProgress": (
+                                failed_progress
+                            ),
+                        }
+                    )
+
                 self._finish_run(
                     run_id,
                     status="failed",
                     error_message=str(
                         e
                     ),
-                    metadata={
-                        "date": (
-                            today.isoformat()
-                        ),
-                        "exceptionType": (
-                            type(
-                                e
-                            ).__name__
-                        ),
-                    },
+                    metadata=(
+                        failure_metadata
+                    ),
                 )
 
                 raise
