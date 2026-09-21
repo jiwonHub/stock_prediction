@@ -1364,6 +1364,45 @@ class DailyPipelineService:
             .limit(1)
         )
 
+        latest_snapshot_item_count = 0
+        latest_snapshot_performance_count = 0
+
+        if latest_snapshot is not None:
+            latest_snapshot_item_count = int(
+                self.db.scalar(
+                    select(
+                        func.count(
+                            RankingItem.id
+                        )
+                    )
+                    .where(
+                        RankingItem.snapshot_id
+                        == latest_snapshot.id
+                    )
+                )
+                or 0
+            )
+
+            latest_snapshot_performance_count = int(
+                self.db.scalar(
+                    select(
+                        func.count(
+                            RecommendationPerformance.id
+                        )
+                    )
+                    .join(
+                        RankingItem,
+                        RankingItem.id
+                        == RecommendationPerformance.ranking_item_id,
+                    )
+                    .where(
+                        RankingItem.snapshot_id
+                        == latest_snapshot.id
+                    )
+                )
+                or 0
+            )
+
         latest_market_date = (
             self.db.scalar(
                 select(
@@ -1437,6 +1476,21 @@ class DailyPipelineService:
             ),
             "latestRankingDate": (
                 latest_snapshot.as_of_date.isoformat()
+                if latest_snapshot
+                else None
+            ),
+            "latestRankingSnapshot": (
+                {
+                    "id": int(
+                        latest_snapshot.id
+                    ),
+                    "itemCount": (
+                        latest_snapshot_item_count
+                    ),
+                    "performanceCount": (
+                        latest_snapshot_performance_count
+                    ),
+                }
                 if latest_snapshot
                 else None
             ),
