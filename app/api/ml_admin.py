@@ -28,6 +28,45 @@ router = APIRouter(
 )
 
 
+@router.post(
+    "/historical/final-model/refit",
+)
+def refit_historical_final_model(
+    confirm: bool = Query(
+        default=False,
+    ),
+    db: Session = Depends(
+        get_db
+    ),
+):
+    if not confirm:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Phase 7 최종 Production 모델 "
+                "재학습입니다. 실행하려면 "
+                "confirm=true를 지정하세요."
+            ),
+        )
+
+    try:
+        return (
+            HistoricalMlFinalModelService(
+                db
+            )
+            .train_final_model()
+        )
+
+    except (
+        ValueError,
+        RuntimeError,
+    ) as e:
+        raise HTTPException(
+            status_code=400,
+            detail=str(e),
+        ) from e
+
+
 @router.get(
     "/historical/split/inspect",
 )
