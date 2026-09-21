@@ -1,4 +1,5 @@
 import json
+from collections.abc import Callable
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
@@ -377,6 +378,19 @@ class StockService:
     async def sync_current_prices(
         self,
         stock_codes: list[str],
+        *,
+        progress_callback: (
+            Callable[
+                [
+                    str,
+                    int,
+                    int,
+                    str | None,
+                ],
+                None,
+            ]
+            | None
+        ) = None,
     ) -> tuple[int, int]:
         symbols = list(
             dict.fromkeys(
@@ -396,6 +410,17 @@ class StockService:
             outputs: list[dict] = []
 
             batch_size = 200
+            total = len(
+                symbols
+            )
+
+            if progress_callback is not None:
+                progress_callback(
+                    "toss",
+                    0,
+                    total,
+                    None,
+                )
 
             for start in range(
                 0,
@@ -416,6 +441,24 @@ class StockService:
                 outputs.extend(
                     batch_outputs
                 )
+
+                if progress_callback is not None:
+                    progress_callback(
+                        "toss",
+                        min(
+                            start
+                            + len(
+                                batch_symbols
+                            ),
+                            total,
+                        ),
+                        total,
+                        (
+                            batch_symbols[-1]
+                            if batch_symbols
+                            else None
+                        ),
+                    )
 
             output_by_code = {
                 str(
@@ -603,6 +646,17 @@ class StockService:
             fallback_codes
         )
 
+        if (
+            progress_callback is not None
+            and fallback_total > 0
+        ):
+            progress_callback(
+                "fallback",
+                0,
+                fallback_total,
+                None,
+            )
+
         for index, stock_code in enumerate(
             fallback_codes,
             start=1,
@@ -636,6 +690,22 @@ class StockService:
                     f"{stock_code}: {e}",
                     flush=True,
                 )
+
+            if progress_callback is not None:
+                progress_callback(
+                    "fallback",
+                    index,
+                    fallback_total,
+                    stock_code,
+                )
+
+        if progress_callback is not None:
+            progress_callback(
+                "complete",
+                len(symbols),
+                len(symbols),
+                None,
+            )
 
         return len(success_codes), skipped
 

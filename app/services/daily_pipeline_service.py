@@ -1283,30 +1283,30 @@ class DailyPipelineService:
 
                     return result
 
-                self._update_run_progress(
-                    run_id,
-                    stage="current_prices",
-                    current=0,
-                    total=1,
-                    force=True,
-                )
-
                 (
                     current_price_success,
                     current_price_failures,
                 ) = await (
                     self.stock_service
                     .sync_current_prices(
-                        universe
+                        universe,
+                        progress_callback=(
+                            lambda phase, current, total, stock_code:
+                            self._update_run_progress(
+                                run_id,
+                                stage=(
+                                    "current_prices"
+                                    if phase == "complete"
+                                    else (
+                                        f"current_prices_{phase}"
+                                    )
+                                ),
+                                current=current,
+                                total=total,
+                                stock_code=stock_code,
+                            )
+                        ),
                     )
-                )
-
-                self._update_run_progress(
-                    run_id,
-                    stage="current_prices",
-                    current=1,
-                    total=1,
-                    force=True,
                 )
 
                 disclosure_rows = 0
