@@ -1600,12 +1600,28 @@ class DailyPipelineService:
                     force=True,
                 )
 
+                self._update_run_progress(
+                    run_id,
+                    stage="ranking_snapshot",
+                    current=0,
+                    total=1,
+                    force=True,
+                )
+
                 self.market_context_service.record_rankings(
                     rankings,
                     as_of_date=(
                         market_date
                     ),
                     replace_existing=True,
+                )
+
+                self._update_run_progress(
+                    run_id,
+                    stage="ranking_snapshot",
+                    current=1,
+                    total=1,
+                    force=True,
                 )
 
                 analysis_snapshot_success = 0
@@ -1668,7 +1684,23 @@ class DailyPipelineService:
                             flush=True,
                         )
 
+                self._update_run_progress(
+                    run_id,
+                    stage="final_performance_evaluation",
+                    current=0,
+                    total=1,
+                    force=True,
+                )
+
                 self.market_context_service.evaluate_performance()
+
+                self._update_run_progress(
+                    run_id,
+                    stage="final_performance_evaluation",
+                    current=1,
+                    total=1,
+                    force=True,
+                )
 
                 total_failures = (
                     toss_market_context_failures
@@ -1846,6 +1878,22 @@ class DailyPipelineService:
                         ),
                     },
                 }
+
+                self._update_run_progress(
+                    run_id,
+                    stage="finalizing",
+                    current=0,
+                    total=1,
+                    force=True,
+                )
+
+                self._update_run_progress(
+                    run_id,
+                    stage="finalizing",
+                    current=1,
+                    total=1,
+                    force=True,
+                )
 
                 self._finish_run(
                     run_id,
