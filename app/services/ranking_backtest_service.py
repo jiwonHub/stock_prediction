@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 from math import ceil, sqrt
-from statistics import mean, median
+from statistics import mean, median, pstdev
 
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
@@ -372,6 +372,13 @@ class RankingBacktestService:
 
             portfolios.append(
                 {
+                    "date":
+                        snapshot_rows[
+                            0
+                        ][
+                            2
+                        ].as_of_date,
+
                     "actual":
                         mean(
                             actual_returns
@@ -426,7 +433,25 @@ class RankingBacktestService:
                 "benchmarkCoveragePercent":
                     None,
 
+                "firstSnapshotDate":
+                    None,
+
+                "lastSnapshotDate":
+                    None,
+
                 "averageReturn":
+                    None,
+
+                "medianReturn":
+                    None,
+
+                "returnStdDev":
+                    None,
+
+                "worstReturn":
+                    None,
+
+                "bestReturn":
                     None,
 
                 "averageBenchmarkReturn":
@@ -438,12 +463,37 @@ class RankingBacktestService:
                 "medianExcessReturn":
                     None,
 
+                "excessStdDev":
+                    None,
+
+                "worstExcessReturn":
+                    None,
+
+                "bestExcessReturn":
+                    None,
+
                 "excessHitRate":
                     None,
 
                 "winRate":
                     None,
+
+                "recentSnapshotCount":
+                    0,
+
+                "recentAverageReturn":
+                    None,
+
+                "recentAverageExcessReturn":
+                    None,
             }
+
+        portfolios.sort(
+            key=lambda row:
+                row[
+                    "date"
+                ]
+        )
 
         actual_values = [
             row[
@@ -471,6 +521,32 @@ class RankingBacktestService:
             ]
             for row
             in portfolios
+            if row[
+                "excess"
+            ]
+            is not None
+        ]
+
+        recent_portfolios = (
+            portfolios[
+                -20:
+            ]
+        )
+
+        recent_actual_values = [
+            row[
+                "actual"
+            ]
+            for row
+            in recent_portfolios
+        ]
+
+        recent_excess_values = [
+            row[
+                "excess"
+            ]
+            for row
+            in recent_portfolios
             if row[
                 "excess"
             ]
@@ -533,9 +609,61 @@ class RankingBacktestService:
                     1,
                 ),
 
+            "firstSnapshotDate":
+                portfolios[
+                    0
+                ][
+                    "date"
+                ].isoformat(),
+
+            "lastSnapshotDate":
+                portfolios[
+                    -1
+                ][
+                    "date"
+                ].isoformat(),
+
             "averageReturn":
                 self._round(
                     mean(
+                        actual_values
+                    ),
+                    3,
+                ),
+
+            "medianReturn":
+                self._round(
+                    median(
+                        actual_values
+                    ),
+                    3,
+                ),
+
+            "returnStdDev":
+                (
+                    self._round(
+                        pstdev(
+                            actual_values
+                        ),
+                        3,
+                    )
+                    if len(
+                        actual_values
+                    ) >= 2
+                    else None
+                ),
+
+            "worstReturn":
+                self._round(
+                    min(
+                        actual_values
+                    ),
+                    3,
+                ),
+
+            "bestReturn":
+                self._round(
+                    max(
                         actual_values
                     ),
                     3,
@@ -577,6 +705,44 @@ class RankingBacktestService:
                     else None
                 ),
 
+            "excessStdDev":
+                (
+                    self._round(
+                        pstdev(
+                            excess_values
+                        ),
+                        3,
+                    )
+                    if len(
+                        excess_values
+                    ) >= 2
+                    else None
+                ),
+
+            "worstExcessReturn":
+                (
+                    self._round(
+                        min(
+                            excess_values
+                        ),
+                        3,
+                    )
+                    if excess_values
+                    else None
+                ),
+
+            "bestExcessReturn":
+                (
+                    self._round(
+                        max(
+                            excess_values
+                        ),
+                        3,
+                    )
+                    if excess_values
+                    else None
+                ),
+
             "excessHitRate":
                 (
                     self._round(
@@ -609,6 +775,35 @@ class RankingBacktestService:
                     )
                     * 100.0,
                     1,
+                ),
+
+            "recentSnapshotCount":
+                len(
+                    recent_portfolios
+                ),
+
+            "recentAverageReturn":
+                (
+                    self._round(
+                        mean(
+                            recent_actual_values
+                        ),
+                        3,
+                    )
+                    if recent_actual_values
+                    else None
+                ),
+
+            "recentAverageExcessReturn":
+                (
+                    self._round(
+                        mean(
+                            recent_excess_values
+                        ),
+                        3,
+                    )
+                    if recent_excess_values
+                    else None
                 ),
         }
 
@@ -1387,6 +1582,16 @@ class RankingBacktestService:
                 "factorSpread": (
                     "Factor 상위 25%와 하위 25%의 "
                     "평균 초과수익률 차이"
+                ),
+
+                "overlap": (
+                    "랭킹 스냅샷별 보유기간이 서로 겹칠 수 있어 "
+                    "일별 스냅샷 수익률을 단순 복리 누적하지 않습니다."
+                ),
+
+                "recentWindow": (
+                    "최근 성과는 최신 평가 스냅샷 "
+                    "최대 20개 기준입니다."
                 ),
 
                 "limitations": [
