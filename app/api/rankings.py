@@ -8,6 +8,12 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
+from app.core.ranking_config import (
+    EXPECTED_RANKING_ITEM_COUNT,
+    PRIMARY_HORIZON_DAYS,
+    RANKING_UNIVERSE,
+    RANKING_VERSION,
+)
 from app.models.future import (
     RankingItem,
     RankingSnapshot,
@@ -39,9 +45,13 @@ router = APIRouter(
 )
 async def get_ranking_snapshot(
     limit: int = Query(
-        default=100,
+        default=(
+            EXPECTED_RANKING_ITEM_COUNT
+        ),
         ge=1,
-        le=100,
+        le=(
+            EXPECTED_RANKING_ITEM_COUNT
+        ),
     ),
     db: Session = Depends(get_db),
 ):
@@ -51,11 +61,11 @@ async def get_ranking_snapshot(
         )
         .where(
             RankingSnapshot.ranking_version
-            == MarketContextService.RANKING_VERSION,
+            == RANKING_VERSION,
             RankingSnapshot.horizon_days
-            == MarketContextService.PRIMARY_HORIZON_DAYS,
+            == PRIMARY_HORIZON_DAYS,
             RankingSnapshot.universe
-            == "KRX",
+            == RANKING_UNIVERSE,
         )
         .order_by(
             RankingSnapshot.as_of_date.desc(),
@@ -102,8 +112,10 @@ async def get_ranking_snapshot(
     )
 
     integrity_ok = (
-        item_count == 100
-        and len(rankings) == limit
+        item_count
+        == EXPECTED_RANKING_ITEM_COUNT
+        and len(rankings)
+        == limit
     )
 
     if not integrity_ok:
@@ -140,6 +152,9 @@ async def get_ranking_snapshot(
             snapshot.universe
         ),
         itemCount=item_count,
+        expectedItemCount=(
+            EXPECTED_RANKING_ITEM_COUNT
+        ),
         requestedCount=limit,
         integrityOk=True,
         isStale=is_stale,

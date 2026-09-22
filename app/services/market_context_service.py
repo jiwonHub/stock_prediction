@@ -13,6 +13,15 @@ from sqlalchemy import delete, func, select
 from sqlalchemy.orm import Session
 
 from app.clients.kis_client import dart_client
+from app.core.ranking_config import (
+    EXPECTED_RANKING_ITEM_COUNT,
+    PRIMARY_HORIZON_DAYS
+    as CURRENT_PRIMARY_HORIZON_DAYS,
+    RANKING_UNIVERSE
+    as CURRENT_RANKING_UNIVERSE,
+    RANKING_VERSION
+    as CURRENT_RANKING_VERSION,
+)
 from app.models.future import (
     Disclosure,
     NewsArticle,
@@ -26,9 +35,17 @@ from app.models.stock import Stock
 from app.models.stock_price import StockPrice
 
 class MarketContextService:
-    RANKING_VERSION = "phase13-long-term-investment-v4"
-    
-    PRIMARY_HORIZON_DAYS = 20
+    RANKING_VERSION = (
+        CURRENT_RANKING_VERSION
+    )
+
+    PRIMARY_HORIZON_DAYS = (
+        CURRENT_PRIMARY_HORIZON_DAYS
+    )
+
+    RANKING_UNIVERSE = (
+        CURRENT_RANKING_UNIVERSE
+    )
 
     PERFORMANCE_HORIZONS = (
         20,
@@ -37,9 +54,13 @@ class MarketContextService:
         240,
     )
 
-    PERFORMANCE_RANK_LIMIT = 100
+    PERFORMANCE_RANK_LIMIT = (
+        EXPECTED_RANKING_ITEM_COUNT
+    )
 
-    MIN_SNAPSHOT_RANKS = 20
+    MIN_SNAPSHOT_RANKS = (
+        EXPECTED_RANKING_ITEM_COUNT
+    )
 
     KST = ZoneInfo("Asia/Seoul")
 

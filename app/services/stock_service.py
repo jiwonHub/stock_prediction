@@ -9,6 +9,9 @@ from app.clients.kis_client import dart_client, kis_client
 from app.clients.toss_client import toss_client
 from app.core.config import settings
 from app.core.exceptions import ConfigurationError, ExternalApiError
+from app.core.ranking_config import (
+    EXPECTED_RANKING_ITEM_COUNT,
+)
 from app.repositories.stock_repository import StockRepository
 from app.schemas.ranking import RankingResponse
 from app.schemas.stock import ChartPointResponse, ChartPageResponse, StockResponse
@@ -1782,8 +1785,7 @@ class StockService:
 
             snapshot_load_limit = max(
                 limit,
-                MarketContextService
-                .MIN_SNAPSHOT_RANKS,
+                EXPECTED_RANKING_ITEM_COUNT,
             )
 
             (
@@ -2178,7 +2180,9 @@ class StockService:
                 self.db
             )
             .score_current_universe(
-                limit=100,
+                limit=(
+                    EXPECTED_RANKING_ITEM_COUNT
+                ),
             )
         )
 

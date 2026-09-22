@@ -1,0 +1,9 @@
+RANKING_VERSION = (
+    "phase13-long-term-investment-v4"
+)
+
+PRIMARY_HORIZON_DAYS = 20
+
+RANKING_UNIVERSE = "KRX"
+
+EXPECTED_RANKING_ITEM_COUNT = 100

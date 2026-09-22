@@ -4,6 +4,9 @@ from datetime import date, timedelta
 
 from sqlalchemy.orm import Session
 
+from app.core.ranking_config import (
+    RANKING_VERSION as CURRENT_RANKING_VERSION,
+)
 from app.repositories.market_data_repository import (
     MarketDataRepository,
 )
@@ -19,7 +22,9 @@ from app.services.ml_ranking_inference_service import (
 
 
 class CompositeRankingService:
-    RANKING_VERSION = "phase13-long-term-investment-v4"
+    RANKING_VERSION = (
+        CURRENT_RANKING_VERSION
+    )
 
     WEIGHTS = {
         "quality": 0.25,
