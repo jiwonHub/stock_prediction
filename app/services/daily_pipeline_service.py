@@ -1632,21 +1632,31 @@ class DailyPipelineService:
                     )
                 )
 
-                # 토/일뿐 아니라
-                # 평일 공휴일도 여기서 걸러집니다.
                 if (
                     market_date is None
                     or market_date
                     != today
                 ):
+                    market_business_date = await (
+                        self.stock_service
+                        .get_latest_market_business_date(
+                            universe,
+                            sample_size=5,
+                        )
+                    )
+
+                    reason = (
+                        "eod_not_ready"
+                        if market_business_date
+                        == today
+                        else "non_trading_day"
+                    )
+
                     result = {
                         "status": (
                             "skipped"
                         ),
-                        "reason": (
-                            "non_trading_day_"
-                            "or_eod_not_ready"
-                        ),
+                        "reason": reason,
                         "date": (
                             today.isoformat()
                         ),
@@ -1654,6 +1664,16 @@ class DailyPipelineService:
                             market_date.isoformat()
                             if market_date
                             else None
+                        ),
+                        "marketBusinessDate": (
+                            market_business_date
+                            .isoformat()
+                            if market_business_date
+                            else None
+                        ),
+                        "retryable": (
+                            reason
+                            == "eod_not_ready"
                         ),
                         "universeCount": (
                             len(

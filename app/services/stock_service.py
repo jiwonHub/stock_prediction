@@ -154,9 +154,9 @@ class StockService:
         )
 
     @staticmethod
-    def _quote_trade_date(
+    def _strict_quote_trade_date(
         output: dict,
-    ) -> date:
+    ) -> date | None:
         timestamp = str(
             output.get(
                 "timestamp",
@@ -172,7 +172,162 @@ class StockService:
             except ValueError:
                 pass
 
+        business_date = str(
+            output.get(
+                "stck_bsop_date",
+                "",
+            )
+        ).strip()
+
+        if (
+            len(business_date) == 8
+            and business_date.isdigit()
+        ):
+            try:
+                return datetime.strptime(
+                    business_date,
+                    "%Y%m%d",
+                ).date()
+            except ValueError:
+                pass
+
+        return None
+
+    @staticmethod
+    def _quote_trade_date(
+        output: dict,
+    ) -> date:
+        trade_date = (
+            StockService
+            ._strict_quote_trade_date(
+                output
+            )
+        )
+
+        if trade_date is not None:
+            return trade_date
+
         return date.today()
+
+    async def get_latest_market_business_date(
+        self,
+        stock_codes: list[str],
+        *,
+        sample_size: int = 5,
+    ) -> date | None:
+        symbols = list(
+            dict.fromkeys(
+                str(stock_code).strip()
+                for stock_code in stock_codes
+                if str(stock_code).strip()
+            )
+        )
+
+        if not symbols:
+            return None
+
+        probe_symbols = symbols[
+            :max(
+                1,
+                min(
+                    sample_size,
+                    10,
+                ),
+            )
+        ]
+
+        trade_dates: list[date] = []
+
+        # KIS 현재가의 stck_bsop_date를 우선 사용합니다.
+        # 실제 증권 영업일 기준값입니다.
+        for stock_code in probe_symbols[:3]:
+            try:
+                output = await (
+                    kis_client
+                    .get_current_price(
+                        stock_code
+                    )
+                )
+
+                trade_date = (
+                    self
+                    ._strict_quote_trade_date(
+                        output
+                    )
+                )
+
+                if trade_date is not None:
+                    trade_dates.append(
+                        trade_date
+                    )
+
+            except (
+                ConfigurationError,
+                ExternalApiError,
+            ) as e:
+                print(
+                    "[MARKET-DATE][KIS] "
+                    f"{stock_code} "
+                    f"failed: {e}",
+                    flush=True,
+                )
+
+        if trade_dates:
+            return max(
+                trade_dates
+            )
+
+        # KIS 확인이 불가능할 때만
+        # Toss timestamp를 보조로 사용합니다.
+        try:
+            outputs = await (
+                toss_client.get_prices(
+                    probe_symbols
+                )
+            )
+
+            for output in outputs:
+                if (
+                    to_float(
+                        output.get(
+                            "lastPrice"
+                        )
+                    )
+                    <= 0.0
+                ):
+                    continue
+
+                trade_date = (
+                    self
+                    ._strict_quote_trade_date(
+                        output
+                    )
+                )
+
+                if trade_date is not None:
+                    trade_dates.append(
+                        trade_date
+                    )
+
+        except (
+            ConfigurationError,
+            ExternalApiError,
+        ) as e:
+            print(
+                "[MARKET-DATE][TOSS] "
+                f"failed: {e}",
+                flush=True,
+            )
+
+        if trade_dates:
+            return max(
+                trade_dates
+            )
+
+        raise ExternalApiError(
+            "시장 영업일 확인용 현재가 기준일을 "
+            "확인할 수 없습니다."
+        )
 
     async def _sync_current_price_from_toss(
         self,
