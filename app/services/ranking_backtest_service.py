@@ -56,6 +56,10 @@ class RankingBacktestService:
     MIN_FACTOR_SNAPSHOTS = 5
 
     MIN_TUNING_LONG_HORIZON_SNAPSHOTS = 20
+    MIN_RELIABLE_FACTORS = 5
+
+    RECENT_PERFORMANCE_MIN_SNAPSHOTS = 10
+    RECENT_EXCESS_DROP_WARNING_PCT = 1.0
 
     def __init__(
         self,
@@ -486,6 +490,15 @@ class RankingBacktestService:
 
                 "recentAverageExcessReturn":
                     None,
+
+                "recentReturnDelta":
+                    None,
+
+                "recentExcessDelta":
+                    None,
+
+                "recentUnderperformance":
+                    False,
             }
 
         portfolios.sort(
@@ -552,6 +565,72 @@ class RankingBacktestService:
             ]
             is not None
         ]
+
+        average_return = mean(
+            actual_values
+        )
+
+        average_excess_return = (
+            mean(
+                excess_values
+            )
+            if excess_values
+            else None
+        )
+
+        recent_average_return = (
+            mean(
+                recent_actual_values
+            )
+            if recent_actual_values
+            else None
+        )
+
+        recent_average_excess_return = (
+            mean(
+                recent_excess_values
+            )
+            if recent_excess_values
+            else None
+        )
+
+        recent_return_delta = (
+            recent_average_return
+            - average_return
+            if recent_average_return
+            is not None
+            else None
+        )
+
+        recent_excess_delta = (
+            recent_average_excess_return
+            - average_excess_return
+            if (
+                recent_average_excess_return
+                is not None
+                and average_excess_return
+                is not None
+            )
+            else None
+        )
+
+        recent_underperformance = (
+            len(
+                recent_portfolios
+            )
+            >= self.RECENT_PERFORMANCE_MIN_SNAPSHOTS
+            and recent_average_excess_return
+            is not None
+            and recent_excess_delta
+            is not None
+            and recent_average_excess_return
+            < 0.0
+            and recent_excess_delta
+            <= (
+                -self
+                .RECENT_EXCESS_DROP_WARNING_PCT
+            )
+        )
 
         expected_observation_count = (
             len(
@@ -625,9 +704,7 @@ class RankingBacktestService:
 
             "averageReturn":
                 self._round(
-                    mean(
-                        actual_values
-                    ),
+                    average_return,
                     3,
                 ),
 
@@ -682,15 +759,9 @@ class RankingBacktestService:
                 ),
 
             "averageExcessReturn":
-                (
-                    self._round(
-                        mean(
-                            excess_values
-                        ),
-                        3,
-                    )
-                    if excess_values
-                    else None
+                self._round(
+                    average_excess_return,
+                    3,
                 ),
 
             "medianExcessReturn":
@@ -783,28 +854,31 @@ class RankingBacktestService:
                 ),
 
             "recentAverageReturn":
-                (
-                    self._round(
-                        mean(
-                            recent_actual_values
-                        ),
-                        3,
-                    )
-                    if recent_actual_values
-                    else None
+                self._round(
+                    recent_average_return,
+                    3,
                 ),
 
             "recentAverageExcessReturn":
-                (
-                    self._round(
-                        mean(
-                            recent_excess_values
-                        ),
-                        3,
-                    )
-                    if recent_excess_values
-                    else None
+                self._round(
+                    recent_average_excess_return,
+                    3,
                 ),
+
+            "recentReturnDelta":
+                self._round(
+                    recent_return_delta,
+                    3,
+                ),
+
+            "recentExcessDelta":
+                self._round(
+                    recent_excess_delta,
+                    3,
+                ),
+
+            "recentUnderperformance":
+                recent_underperformance,
         }
 
     def _factor_diagnostic(
@@ -941,6 +1015,22 @@ class RankingBacktestService:
                 pairs
             )
 
+        sufficient_data = (
+            len(
+                ic_values
+            )
+            >= self.MIN_FACTOR_SNAPSHOTS
+            and len(
+                spreads
+            )
+            >= self.MIN_FACTOR_SNAPSHOTS
+            and pair_count
+            >= (
+                self.MIN_FACTOR_PAIRS
+                * self.MIN_FACTOR_SNAPSHOTS
+            )
+        )
+
         return {
             "horizonTradingDays":
                 horizon,
@@ -950,8 +1040,16 @@ class RankingBacktestService:
                     ic_values
                 ),
 
+            "spreadSnapshotCount":
+                len(
+                    spreads
+                ),
+
             "pairCount":
                 pair_count,
+
+            "sufficientData":
+                sufficient_data,
 
             "meanIc":
                 (
@@ -962,6 +1060,20 @@ class RankingBacktestService:
                         4,
                     )
                     if ic_values
+                    else None
+                ),
+
+            "icStdDev":
+                (
+                    self._round(
+                        pstdev(
+                            ic_values
+                        ),
+                        4,
+                    )
+                    if len(
+                        ic_values
+                    ) >= 2
                     else None
                 ),
 
@@ -991,6 +1103,39 @@ class RankingBacktestService:
                             spreads
                         ),
                         3,
+                    )
+                    if spreads
+                    else None
+                ),
+
+            "spreadStdDev":
+                (
+                    self._round(
+                        pstdev(
+                            spreads
+                        ),
+                        3,
+                    )
+                    if len(
+                        spreads
+                    ) >= 2
+                    else None
+                ),
+
+            "spreadPositiveRate":
+                (
+                    self._round(
+                        sum(
+                            1
+                            for value
+                            in spreads
+                            if value > 0.0
+                        )
+                        / len(
+                            spreads
+                        )
+                        * 100.0,
+                        1,
                     )
                     if spreads
                     else None
@@ -1025,6 +1170,42 @@ class RankingBacktestService:
             )
         }
 
+        reliable_factors = []
+
+        for factor in (
+            current_weights
+        ):
+            diagnostics = (
+                factor_diagnostics.get(
+                    factor,
+                    {}
+                )
+            )
+
+            has_reliable_long_horizon = any(
+                bool(
+                    diagnostics.get(
+                        str(
+                            horizon
+                        ),
+                        {},
+                    ).get(
+                        "sufficientData",
+                        False,
+                    )
+                )
+                for horizon in (
+                    60,
+                    120,
+                    240,
+                )
+            )
+
+            if has_reliable_long_horizon:
+                reliable_factors.append(
+                    factor
+                )
+
         ready = (
             len(
                 long_horizon_dates
@@ -1033,6 +1214,10 @@ class RankingBacktestService:
                 self
                 .MIN_TUNING_LONG_HORIZON_SNAPSHOTS
             )
+            and len(
+                reliable_factors
+            )
+            >= self.MIN_RELIABLE_FACTORS
         )
 
         if not ready:
@@ -1054,6 +1239,17 @@ class RankingBacktestService:
                         .MIN_TUNING_LONG_HORIZON_SNAPSHOTS
                     ),
 
+                "reliableFactorCount":
+                    len(
+                        reliable_factors
+                    ),
+
+                "minimumReliableFactors":
+                    self.MIN_RELIABLE_FACTORS,
+
+                "reliableFactors":
+                    reliable_factors,
+
                 "currentWeights":
                     current_weights,
 
@@ -1068,8 +1264,8 @@ class RankingBacktestService:
                 },
 
                 "message": (
-                    "60거래일 이상 성과가 충분히 "
-                    "누적되기 전에는 가중치 변경을 "
+                    "장기 성과와 Factor 진단 신뢰도가 "
+                    "충분히 누적되기 전에는 가중치 변경을 "
                     "제안하지 않습니다."
                 ),
             }
@@ -1105,14 +1301,11 @@ class RankingBacktestService:
                     )
                 )
 
-                if (
-                    int(
-                        item.get(
-                            "snapshotCount"
-                        )
-                        or 0
+                if not bool(
+                    item.get(
+                        "sufficientData",
+                        False,
                     )
-                    < self.MIN_FACTOR_SNAPSHOTS
                 ):
                     continue
 
@@ -1260,6 +1453,17 @@ class RankingBacktestService:
                     self
                     .MIN_TUNING_LONG_HORIZON_SNAPSHOTS
                 ),
+
+            "reliableFactorCount":
+                len(
+                    reliable_factors
+                ),
+
+            "minimumReliableFactors":
+                self.MIN_RELIABLE_FACTORS,
+
+            "reliableFactors":
+                reliable_factors,
 
             "currentWeights":
                 current_weights,
