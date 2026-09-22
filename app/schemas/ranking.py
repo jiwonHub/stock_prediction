@@ -1,3 +1,5 @@
+from datetime import date
+
 from pydantic import BaseModel, ConfigDict, Field
 
 
@@ -30,6 +32,24 @@ class RankingResponse(BaseModel):
     riskScore: float | None = None
     mlScore: float = 0.0
     dataCoverage: float = 0.0
+
+
+class RankingSnapshotResponse(BaseModel):
+    asOfDate: date
+    latestMarketDate: date | None = None
+
+    rankingVersion: str
+    horizonDays: int
+    universe: str
+
+    itemCount: int
+    requestedCount: int
+
+    integrityOk: bool
+    isStale: bool
+
+    items: list[RankingResponse]
+
 
 class RankingFactorResponse(BaseModel):
     model_config = ConfigDict(
