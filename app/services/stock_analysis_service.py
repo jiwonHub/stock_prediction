@@ -72,6 +72,46 @@ class StockAnalysisService:
         *,
         stock_code: str,
     ) -> dict:
+        stock = (
+            self.stock_repository
+            .get_stock(
+                stock_code
+            )
+        )
+
+        if stock is None:
+            raise ValueError(
+                "등록되지 않은 종목입니다: "
+                f"{stock_code}"
+            )
+
+        (
+            ranking_snapshot,
+            ranking_item,
+        ) = (
+            self.stock_repository
+            .get_latest_ranking_snapshot_item_by_stock_code(
+                stock_code=stock_code,
+                ranking_version=(
+                    MarketContextService
+                    .RANKING_VERSION
+                ),
+                horizon_days=(
+                    MarketContextService
+                    .PRIMARY_HORIZON_DAYS
+                ),
+                universe="KRX",
+            )
+        )
+
+        if (
+            ranking_snapshot is None
+            or ranking_item is None
+        ):
+            return self.get_current_analysis(
+                stock_code=stock_code,
+            )
+
         snapshot = self.db.scalar(
             select(
                 StockAnalysisSnapshot
@@ -79,25 +119,52 @@ class StockAnalysisService:
             .where(
                 StockAnalysisSnapshot.stock_code
                 == stock_code,
+                StockAnalysisSnapshot.snapshot_date
+                == ranking_snapshot.as_of_date,
                 StockAnalysisSnapshot.ranking_version
                 == MarketContextService.RANKING_VERSION,
-            )
-            .order_by(
-                StockAnalysisSnapshot.snapshot_date.desc(),
-                StockAnalysisSnapshot.updated_at.desc(),
             )
             .limit(1)
         )
 
         if snapshot is None:
-            raise ValueError(
-                "일일 분석 스냅샷이 없습니다: "
-                f"{stock_code}"
+            return self.get_current_analysis(
+                stock_code=stock_code,
             )
 
         return dict(
             snapshot.payload_json
         )
+    
+    def get_valuation_lookup(
+        self,
+        *,
+        stock_code: str,
+    ) -> dict:
+        stock = (
+            self.stock_repository
+            .get_stock(
+                stock_code
+            )
+        )
+
+        if stock is None:
+            raise ValueError(
+                f"등록되지 않은 종목입니다: {stock_code}"
+            )
+
+        return {
+            "stockCode":
+                stock.code,
+
+            "stockName":
+                stock.name,
+
+            "valuation":
+                self._build_valuation(
+                    stock_code=stock_code,
+                ),
+        }
 
     def save_daily_snapshot(
         self,
@@ -2446,6 +2513,38 @@ class StockAnalysisService:
         *,
         stock_code: str,
     ) -> dict:
+        stock = (
+            self.stock_repository
+            .get_stock(
+                stock_code
+            )
+        )
+
+        if stock is None:
+            raise ValueError(
+                "등록되지 않은 종목입니다: "
+                f"{stock_code}"
+            )
+
+        (
+            _,
+            ranking_item,
+        ) = (
+            self.stock_repository
+            .get_latest_ranking_snapshot_item_by_stock_code(
+                stock_code=stock_code,
+                ranking_version=(
+                    MarketContextService
+                    .RANKING_VERSION
+                ),
+                horizon_days=(
+                    MarketContextService
+                    .PRIMARY_HORIZON_DAYS
+                ),
+                universe="KRX",
+            )
+        )
+
         ranking = (
             RankingExplanationService(
                 self.db
@@ -2454,6 +2553,8 @@ class StockAnalysisService:
                 stock_code,
                 top_k=3,
             )
+            if ranking_item is not None
+            else None
         )
 
         technical = (
@@ -2572,7 +2673,10 @@ class StockAnalysisService:
 
         analysis_brief = (
             StockAnalysisBriefService.build(
-                ranking=ranking,
+                ranking=(
+                    ranking
+                    or {}
+                ),
 
                 financial=financial,
 
@@ -2601,14 +2705,10 @@ class StockAnalysisService:
         )
         return {
             "stockCode":
-                ranking[
-                    "stock_code"
-                ],
+                stock.code,
 
             "stockName":
-                ranking[
-                    "stock_name"
-                ],
+                stock.name,
 
             "ranking":
                 ranking,

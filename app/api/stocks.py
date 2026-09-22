@@ -10,6 +10,7 @@ from app.schemas.stock import (
     ChartPointResponse,
     StockAnalysisResponse,
     StockResponse,
+    StockValuationLookupResponse,
 )
 from app.services.stock_analysis_service import (
     StockAnalysisService,
@@ -42,6 +43,32 @@ async def search_stocks(
     return await service.search_stocks(
         q
     )
+
+@router.get(
+    "/{stock_code}/valuation",
+    response_model=(
+        StockValuationLookupResponse
+    ),
+)
+def get_stock_valuation(
+    stock_code: str,
+    db: Session = Depends(
+        get_db
+    ),
+):
+    try:
+        return StockAnalysisService(
+            db
+        ).get_valuation_lookup(
+            stock_code=stock_code,
+        )
+
+    except ValueError as e:
+        raise HTTPException(
+            status_code=404,
+            detail=str(e),
+        ) from e
+
 
 @router.get(
     "/{stock_code}/logo",

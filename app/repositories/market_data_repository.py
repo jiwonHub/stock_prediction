@@ -503,6 +503,34 @@ class MarketDataRepository:
             ).all()
         )
 
+    def get_latest_market_index_prices(
+        self,
+        *,
+        index_code: str,
+        limit: int = 260,
+    ) -> list[MarketIndexPrice]:
+        stmt = (
+            select(MarketIndexPrice)
+            .where(
+                MarketIndexPrice.index_code
+                == index_code,
+            )
+            .order_by(
+                MarketIndexPrice.trade_date.desc()
+            )
+            .limit(limit)
+        )
+
+        rows = list(
+            self.db.scalars(
+                stmt
+            ).all()
+        )
+
+        rows.reverse()
+
+        return rows
+
     def get_market_investor_flows(
         self,
         *,

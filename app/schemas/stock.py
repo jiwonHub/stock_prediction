@@ -475,6 +475,14 @@ class StockValuationAnalysisResponse(
     source: str | None
 
 
+class StockValuationLookupResponse(
+    BaseModel
+):
+    stockCode: str
+    stockName: str
+    valuation: StockValuationAnalysisResponse
+
+
 class StockLongTermFinancialPointResponse(
     BaseModel
 ):
@@ -559,7 +567,7 @@ class StockAnalysisResponse(BaseModel):
     stockCode: str
     stockName: str
 
-    ranking: RankingExplanationResponse
+    ranking: RankingExplanationResponse | None
 
     technical: TechnicalAnalysisResponse
 

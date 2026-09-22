@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from datetime import date, timedelta
-
 from sqlalchemy.orm import Session
 
 from app.repositories.market_data_repository import (
@@ -245,16 +243,11 @@ class MarketRegimeService:
 
         rows = (
             self.market_repository
-            .get_market_index_prices(
+            .get_latest_market_index_prices(
                 index_code=(
                     index_code
                 ),
-                start_date=(
-                    date.today()
-                    - timedelta(
-                        days=600
-                    )
-                ),
+                limit=260,
             )
         )
 

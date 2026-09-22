@@ -779,10 +779,17 @@ class MarketDataService:
     ) -> dict:
         end_date = date.today()
 
+        summary_lookback_days = max(
+            days,
+            90,
+        )
+
         start_date = (
             end_date
             - timedelta(
-                days=days
+                days=(
+                    summary_lookback_days
+                )
             )
         )
 
