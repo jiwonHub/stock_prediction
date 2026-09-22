@@ -193,6 +193,7 @@ def get_ranking_explanation(
 @router.get(
     "",
     response_model=list[RankingResponse],
+    deprecated=True,
 )
 async def get_rankings(
     limit: int = Query(

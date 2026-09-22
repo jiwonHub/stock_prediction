@@ -4,7 +4,7 @@ from collections import defaultdict
 from math import ceil, sqrt
 from statistics import mean, median
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.models.future import (
@@ -218,12 +218,6 @@ class RankingBacktestService:
                     None
                 ),
 
-                RecommendationPerformance
-                .excess_return
-                .is_not(
-                    None
-                ),
-
                 RankingItem.rank
                 <= MarketContextService
                 .PERFORMANCE_RANK_LIMIT,
@@ -296,18 +290,12 @@ class RankingBacktestService:
         portfolios = []
 
         observation_count = 0
+        benchmark_observation_count = 0
+        benchmark_snapshot_count = 0
 
         for snapshot_rows in (
             grouped.values()
         ):
-            if (
-                len(
-                    snapshot_rows
-                )
-                < minimum_count
-            ):
-                continue
-
             actual_returns = [
                 float(
                     performance
@@ -323,6 +311,14 @@ class RankingBacktestService:
                 .actual_return
                 is not None
             ]
+
+            if (
+                len(
+                    actual_returns
+                )
+                < minimum_count
+            ):
+                continue
 
             benchmark_returns = [
                 float(
@@ -356,17 +352,23 @@ class RankingBacktestService:
                 is not None
             ]
 
-            if (
+            observation_count += len(
+                actual_returns
+            )
+
+            benchmark_observation_count += len(
+                excess_returns
+            )
+
+            benchmark_comparable = (
                 len(
                     excess_returns
                 )
-                < minimum_count
-            ):
-                continue
-
-            observation_count += len(
-                excess_returns
+                >= minimum_count
             )
+
+            if benchmark_comparable:
+                benchmark_snapshot_count += 1
 
             portfolios.append(
                 {
@@ -380,13 +382,20 @@ class RankingBacktestService:
                             mean(
                                 benchmark_returns
                             )
-                            if benchmark_returns
+                            if (
+                                benchmark_comparable
+                                and benchmark_returns
+                            )
                             else None
                         ),
 
                     "excess":
-                        mean(
-                            excess_returns
+                        (
+                            mean(
+                                excess_returns
+                            )
+                            if benchmark_comparable
+                            else None
                         ),
                 }
             )
@@ -396,11 +405,26 @@ class RankingBacktestService:
                 "cutoff":
                     cutoff,
 
+                "minimumRequiredObservations":
+                    minimum_count,
+
                 "snapshotCount":
+                    0,
+
+                "benchmarkSnapshotCount":
                     0,
 
                 "observationCount":
                     0,
+
+                "benchmarkObservationCount":
+                    0,
+
+                "actualCoveragePercent":
+                    None,
+
+                "benchmarkCoveragePercent":
+                    None,
 
                 "averageReturn":
                     None,
@@ -447,19 +471,67 @@ class RankingBacktestService:
             ]
             for row
             in portfolios
+            if row[
+                "excess"
+            ]
+            is not None
         ]
+
+        expected_observation_count = (
+            len(
+                portfolios
+            )
+            * cutoff
+        )
+
+        actual_coverage_percent = (
+            observation_count
+            / expected_observation_count
+            * 100.0
+            if expected_observation_count > 0
+            else None
+        )
+
+        benchmark_coverage_percent = (
+            benchmark_observation_count
+            / observation_count
+            * 100.0
+            if observation_count > 0
+            else None
+        )
 
         return {
             "cutoff":
                 cutoff,
+
+            "minimumRequiredObservations":
+                minimum_count,
 
             "snapshotCount":
                 len(
                     portfolios
                 ),
 
+            "benchmarkSnapshotCount":
+                benchmark_snapshot_count,
+
             "observationCount":
                 observation_count,
+
+            "benchmarkObservationCount":
+                benchmark_observation_count,
+
+            "actualCoveragePercent":
+                self._round(
+                    actual_coverage_percent,
+                    1,
+                ),
+
+            "benchmarkCoveragePercent":
+                self._round(
+                    benchmark_coverage_percent,
+                    1,
+                ),
 
             "averageReturn":
                 self._round(
@@ -482,34 +554,46 @@ class RankingBacktestService:
                 ),
 
             "averageExcessReturn":
-                self._round(
-                    mean(
-                        excess_values
-                    ),
-                    3,
+                (
+                    self._round(
+                        mean(
+                            excess_values
+                        ),
+                        3,
+                    )
+                    if excess_values
+                    else None
                 ),
 
             "medianExcessReturn":
-                self._round(
-                    median(
-                        excess_values
-                    ),
-                    3,
+                (
+                    self._round(
+                        median(
+                            excess_values
+                        ),
+                        3,
+                    )
+                    if excess_values
+                    else None
                 ),
 
             "excessHitRate":
-                self._round(
-                    sum(
-                        1
-                        for value
-                        in excess_values
-                        if value > 0.0
+                (
+                    self._round(
+                        sum(
+                            1
+                            for value
+                            in excess_values
+                            if value > 0.0
+                        )
+                        / len(
+                            excess_values
+                        )
+                        * 100.0,
+                        1,
                     )
-                    / len(
-                        excess_values
-                    )
-                    * 100.0,
-                    1,
+                    if excess_values
+                    else None
                 ),
 
             "winRate":
@@ -736,9 +820,14 @@ class RankingBacktestService:
                 snapshot,
             )
             in rows
-            if performance
-            .horizon_days
-            >= 60
+            if (
+                performance
+                .horizon_days
+                >= 60
+                and performance
+                .excess_return
+                is not None
+            )
         }
 
         ready = (
@@ -993,6 +1082,162 @@ class RankingBacktestService:
             ),
         }
 
+    def _evaluation_progress(
+        self,
+    ) -> list[dict]:
+        result = []
+
+        for horizon in (
+            self.HORIZONS
+        ):
+            base_filters = (
+                RankingSnapshot
+                .ranking_version
+                == MarketContextService
+                .RANKING_VERSION,
+
+                RecommendationPerformance
+                .horizon_days
+                == horizon,
+
+                RankingItem.rank
+                <= MarketContextService
+                .PERFORMANCE_RANK_LIMIT,
+            )
+
+            def load_counts(
+                *extra_filters,
+            ) -> tuple[int, int]:
+                row = self.db.execute(
+                    select(
+                        func.count(
+                            RecommendationPerformance.id
+                        ),
+                        func.count(
+                            func.distinct(
+                                RankingSnapshot.id
+                            )
+                        ),
+                    )
+                    .join(
+                        RankingItem,
+                        RankingItem.id
+                        == RecommendationPerformance
+                        .ranking_item_id,
+                    )
+                    .join(
+                        RankingSnapshot,
+                        RankingSnapshot.id
+                        == RankingItem.snapshot_id,
+                    )
+                    .where(
+                        *base_filters,
+                        *extra_filters,
+                    )
+                ).one()
+
+                return (
+                    int(
+                        row[0]
+                        or 0
+                    ),
+                    int(
+                        row[1]
+                        or 0
+                    ),
+                )
+
+            (
+                total_observation_count,
+                total_snapshot_count,
+            ) = load_counts()
+
+            (
+                evaluated_observation_count,
+                evaluated_snapshot_count,
+            ) = load_counts(
+                RecommendationPerformance
+                .actual_return
+                .is_not(
+                    None
+                ),
+            )
+
+            (
+                benchmark_observation_count,
+                benchmark_snapshot_count,
+            ) = load_counts(
+                RecommendationPerformance
+                .excess_return
+                .is_not(
+                    None
+                ),
+            )
+
+            pending_observation_count = max(
+                0,
+                total_observation_count
+                - evaluated_observation_count,
+            )
+
+            evaluation_percent = (
+                evaluated_observation_count
+                / total_observation_count
+                * 100.0
+                if total_observation_count > 0
+                else 0.0
+            )
+
+            benchmark_coverage_percent = (
+                benchmark_observation_count
+                / evaluated_observation_count
+                * 100.0
+                if evaluated_observation_count > 0
+                else None
+            )
+
+            result.append(
+                {
+                    "tradingDays":
+                        horizon,
+
+                    "totalObservationCount":
+                        total_observation_count,
+
+                    "evaluatedObservationCount":
+                        evaluated_observation_count,
+
+                    "benchmarkObservationCount":
+                        benchmark_observation_count,
+
+                    "pendingObservationCount":
+                        pending_observation_count,
+
+                    "evaluationPercent":
+                        self._round(
+                            evaluation_percent,
+                            1,
+                        ),
+
+                    "benchmarkCoveragePercent":
+                        self._round(
+                            benchmark_coverage_percent,
+                            1,
+                        ),
+
+                    "totalSnapshotCount":
+                        total_snapshot_count,
+
+                    "evaluatedSnapshotCount":
+                        evaluated_snapshot_count,
+
+                    "benchmarkSnapshotCount":
+                        benchmark_snapshot_count,
+                }
+            )
+
+        return result
+
     def build_report(
         self,
     ) -> dict:
@@ -1001,6 +1246,10 @@ class RankingBacktestService:
         ).evaluate_performance()
 
         rows = self._load_rows()
+
+        evaluation_progress = (
+            self._evaluation_progress()
+        )
 
         horizon_reports = []
 
@@ -1083,6 +1332,9 @@ class RankingBacktestService:
 
             "horizons":
                 horizon_reports,
+
+            "evaluationProgress":
+                evaluation_progress,
 
             "factorDiagnostics":
                 factor_diagnostics,

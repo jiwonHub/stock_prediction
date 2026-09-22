@@ -43,6 +43,7 @@ class RankingSnapshotResponse(BaseModel):
     universe: str
 
     itemCount: int
+    expectedItemCount: int
     requestedCount: int
 
     integrityOk: bool
